@@ -21,24 +21,33 @@ Your courses, players, rounds and settings are saved in the browser's `localStor
 they persist between visits on the same browser/device, but won't sync across devices
 unless you deploy it (see below) and always use the same browser to reach it.
 
+> **Note on OpenStreetMap search locally:** `npm run dev` (plain Vite) does **not** serve the
+> `/api/*` serverless functions that course search relies on (see below) — you'll see search
+> requests fail with a 404 in this mode. Manual lat/lon course entry and everything else in the
+> app work fine under `npm run dev`. To test OpenStreetMap search locally too, install the
+> [Vercel CLI](https://vercel.com/docs/cli) (`npm i -g vercel`) and run `vercel dev` instead —
+> it serves the app *and* the `/api` functions together, matching production.
+
 ## Deploy it for free
 
-Any static host works since this builds to plain HTML/JS/CSS. Two easy options:
-
-### Vercel
-1. Push this folder to a GitHub repo (or drag-and-drop the folder at vercel.com/new)
+### Vercel (recommended — required for OpenStreetMap course search)
+1. Push this folder to a GitHub repo
 2. Import the repo at [vercel.com/new](https://vercel.com/new)
-3. Framework preset: **Vite** (auto-detected) — no config needed
+3. Framework preset: **Vite** (auto-detected) — no config needed. The `api/` folder is
+   auto-detected too and deployed as serverless functions; nothing extra to set up.
 4. Deploy. You'll get a `*.vercel.app` URL immediately, with a custom domain option.
+5. Connect the GitHub repo (step 1) once and every `git push` auto-redeploys from then on.
 
 ### Netlify
-1. Run `npm run build` locally — this creates a `dist/` folder
-2. Go to [app.netlify.com/drop](https://app.netlify.com/drop) and drag the `dist/` folder in
-3. You'll get a live URL instantly. For ongoing updates, connect it to a GitHub repo instead
-   (build command `npm run build`, publish directory `dist`) so every push redeploys.
+Netlify Drop (drag-and-drop a `dist/` folder) is a static-only host — it can't run the
+`api/` serverless functions this app now depends on for OpenStreetMap search, so course
+search would fail there. If you'd rather use Netlify than Vercel, connect it to the GitHub
+repo and add the two files under `api/` as [Netlify Functions](https://docs.netlify.com/functions/overview/)
+instead (they'd need minor adjustment to Netlify's handler signature). Vercel needs no such
+changes, which is why it's the recommended path.
 
-Either way, add it to your phone's home screen afterward (share menu → "Add to Home Screen")
-for an app-like icon and full-screen feel.
+Either way, add the deployed site to your phone's home screen afterward (share menu →
+"Add to Home Screen") for an app-like icon and full-screen feel.
 
 ## Course data: OpenStreetMap
 
@@ -56,10 +65,17 @@ mapped that specific course in detail:
 Because this relies on public OpenStreetMap data, be considerate with request volume —
 it's shared free infrastructure, fine for personal use as-is.
 
-**Resilience & local caching (added 6 Aug):** the Overpass hole-lookup step tries three
-public Overpass mirrors in turn before giving up, since the main public instance gets
-overloaded sometimes — a temporary failure there now shows an honest message with a
-**↻ Retry hole lookup** button, instead of looking identical to "this course isn't mapped".
+**Server-side proxy (added 6 Aug):** the browser never talks to Nominatim/Overpass directly.
+Both calls go through this app's own `/api/osm-search` and `/api/osm-holes` serverless
+functions (in the `api/` folder), which forward the request server-side with a real,
+identifying `User-Agent` header. This exists because a browser's JS `fetch()` can never set
+a custom `User-Agent` at all (a hard browser restriction), and unidentified requests from a
+generic `*.vercel.app`/`*.netlify.app` domain were found to get silently blocked by these
+services' anti-abuse systems (confirmed via a `406` response in the browser's Network tab)
+even though the exact same course worked instantly on `localhost` every time. The Overpass
+mirror fallback (tries a couple of alternate public instances before giving up) also now
+lives server-side in `api/osm-holes.js`, with a **↻ Retry hole lookup** button in the UI for
+when every mirror is genuinely down.
 
 Every hole-data result that's fetched successfully — including a genuine "nothing mapped"
 answer — is cached in `localStorage`, keyed to that course's OpenStreetMap id. Re-selecting

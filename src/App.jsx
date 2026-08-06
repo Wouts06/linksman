@@ -202,11 +202,18 @@ function osmCacheKey(candidate) {
 function loadOSMCache() { return loadKey("golf:osmHoleCache", {}); }
 function saveOSMCache(cache) { saveKey("golf:osmHoleCache", cache); }
 
-/* OpenStreetMap: Nominatim for course search, Overpass for hole geometry/par/yardage */
+/* OpenStreetMap: Nominatim for course search, Overpass for hole geometry/par/yardage.
+   Both calls go through this app's own /api/* serverless functions (see api/osm-search.js and
+   api/osm-holes.js) rather than hitting nominatim.openstreetmap.org / overpass-api.de directly
+   from the browser. Reason: browser JS can never set a custom User-Agent header (a hard browser
+   restriction), and unidentified requests from generic *.vercel.app/*.netlify.app domains are
+   known to get rate-limited/blocked by these services' anti-abuse systems more aggressively than
+   an identified server-side client. The serverless functions send a real User-Agent and make
+   these same-origin requests as far as the browser is concerned. */
 async function searchOSMCourses(query) {
-  const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&addressdetails=1&q=${encodeURIComponent(query)}`;
+  const url = `/api/osm-search?q=${encodeURIComponent(query)}`;
   const res = await fetchWithTimeout(url, { headers: { Accept: "application/json" } }, 15000);
-  if (!res.ok) throw new Error("Nominatim search failed");
+  if (!res.ok) throw new Error("Course search failed");
   const data = await res.json();
   return data.map((d) => ({
     osmType: d.osm_type,
@@ -218,14 +225,6 @@ async function searchOSMCourses(query) {
     boundingbox: d.boundingbox ? d.boundingbox.map(Number) : null, // [south, north, west, east]
   }));
 }
-/* Overpass has one primary public instance plus a couple of community-run mirrors —
-   the primary is well known to be overloaded/rate-limited at times, so we fall back rather
-   than let a temporary 429/504 masquerade as "this course has no hole data". */
-const OVERPASS_ENDPOINTS = [
-  "https://overpass-api.de/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter",
-  "https://overpass.openstreetmap.ru/api/interpreter",
-];
 
 async function fetchWithTimeout(url, options, timeoutMs) {
   const controller = new AbortController();
@@ -260,33 +259,31 @@ function parseOSMHoleElements(data) {
     .sort((a, b) => a.number - b.number);
 }
 
-/* throws (rather than silently returning []) when every endpoint fails, so the caller can
-   tell "this course genuinely has no mapped holes" apart from "the service is down/busy" */
+/* throws (rather than silently returning []) when the lookup fails, so the caller can
+   tell "this course genuinely has no mapped holes" apart from "the service is down/busy".
+   The mirror-fallback logic now lives server-side in api/osm-holes.js — this just calls that
+   one same-origin endpoint. */
 async function fetchOSMHoles(boundingbox) {
   if (!boundingbox) return [];
   const [south, north, west, east] = boundingbox;
-  const query = `[out:json][timeout:25];(way["golf"="hole"](${south},${west},${north},${east}););out geom;`;
-  let lastError = null;
-  for (const endpoint of OVERPASS_ENDPOINTS) {
-    try {
-      const res = await fetchWithTimeout(endpoint, {
-        method: "POST",
-        body: "data=" + encodeURIComponent(query),
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      }, 20000);
-      if (!res.ok) {
-        lastError = new Error(`Overpass ${endpoint} responded ${res.status}`);
-        continue; // try the next mirror — 429/504 here is transient server load, not "no data"
-      }
-      const data = await res.json();
-      return parseOSMHoleElements(data);
-    } catch (e) {
-      lastError = e; // network error, CORS block, or our own timeout — try the next mirror
+  const url = `/api/osm-holes?south=${south}&north=${north}&west=${west}&east=${east}`;
+  try {
+    const res = await fetchWithTimeout(url, {}, 20000);
+    if (!res.ok) {
+      let detail = "";
+      try {
+        const body = await res.json();
+        detail = body && body.error ? ` (${body.error})` : "";
+      } catch {}
+      throw new Error(`Hole lookup failed${detail || `: ${res.status}`}`);
     }
+    const data = await res.json();
+    return parseOSMHoleElements(data);
+  } catch (e) {
+    const err = new Error("Hole lookup failed");
+    err.cause = e;
+    throw err;
   }
-  const err = new Error("All Overpass endpoints failed");
-  err.cause = lastError;
-  throw err;
 }
 
 const COUNT_TABLE = { 3: 1, 4: 1, 5: 1, 6: 2, 7: 2, 8: 2, 9: 3, 10: 3, 11: 3, 12: 4, 13: 4, 14: 4, 15: 5, 16: 5, 17: 6, 18: 6, 19: 7 };
@@ -626,7 +623,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
       // fetchOSMHoles throws only when every Overpass mirror failed (timeout/rate-limit/network) —
       // that's a temporary service problem, not "this course has no holes", so say so and offer a retry
       setOsmFailed(true);
-      setOsmStatus("Location set, but OpenStreetMap's hole-data service (Overpass) didn't respond — it's a shared free service and gets overloaded sometimes. Try the retry button below in a minute, or enter holes manually.");
+      setOsmStatus("Location set, but OpenStreetMap's hole-data service (Overpass) is currently rejecting requests — it's a known, widespread issue with the free public service, not specific to this device or how the app is hosted. Try the retry button below in a minute (it tries 3 different mirrors), or enter holes manually.");
     }
     setOsmLoading(false);
   }
@@ -674,7 +671,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
       applyOSMHoles(osmHoles, null);
     } catch (e) {
       setOsmFailed(true);
-      setOsmStatus("Still no response from OpenStreetMap's hole-data service — it may be down or rate-limiting right now. The course location is saved either way; enter holes manually below, or try again shortly.");
+      setOsmStatus("Still rejecting requests across all 3 mirrors — the public Overpass service is under heavy load right now (a known, current issue, unrelated to this app). The course location is saved either way; enter holes manually below, or try again in a few minutes.");
     }
     setOsmLoading(false);
   }
