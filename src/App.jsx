@@ -708,7 +708,7 @@ function VoiceCaddyButton({ voiceOn, setVoiceOn, voiceMsg, mePlayer, wakeWord })
         disabled={!supported}
         onClick={() => setVoiceOn(!voiceOn)}
         style={{
-          ...btnGhost, fontSize: 12, whiteSpace: "nowrap",
+          ...headerActionBtnStyle,
           background: voiceOn ? C.flag : C.white, color: voiceOn ? C.white : C.fairway, borderColor: voiceOn ? C.flag : C.fairway,
           opacity: supported ? 1 : 0.5, cursor: supported ? "pointer" : "not-allowed",
         }}
@@ -798,6 +798,16 @@ const btnPrimary = {
 const btnGhost = {
   background: "transparent", color: C.fairway, border: `1px solid ${C.fairway}`, borderRadius: 6,
   padding: "10px 16px", fontFamily: sans, fontSize: 14, fontWeight: 600, cursor: "pointer",
+};
+/* used for the small action buttons that sit side-by-side in a scoring-screen header (Voice
+   caddy, Back to setup) — an explicit height + flex-centering, rather than padding alone,
+   because a button containing an emoji (🎙️) can render 3-4px taller than a plain-text button
+   at the "same" padding: color-emoji glyphs pull in a different font whose line metrics don't
+   match the surrounding sans-serif text, inflating the line box. Fixing the box height directly
+   sidesteps that regardless of glyph metrics. */
+const headerActionBtnStyle = {
+  ...btnGhost, fontSize: 12, height: 36, lineHeight: "20px", boxSizing: "border-box",
+  display: "inline-flex", alignItems: "center", justifyContent: "center", whiteSpace: "nowrap",
 };
 const btnDanger = {
   background: "transparent", color: C.flag, border: `1px solid ${C.flag}`, borderRadius: 6,
@@ -1584,6 +1594,55 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
   );
 }
 
+/* single "focused" hole in the per-hole better-ball scoring view — same hole-number/par/stroke
+   index/distance header as the stroke-play version, wrapping the existing per-team
+   BetterBallHoleCard(s) side by side underneath, plus the same Next/Finish hole button. */
+function BetterBallFocusedHole({
+  hole, isLast, solo, pA1, pB1, pA2, pB2, team1Ids, team2Ids, bbState, distanceUnit, livePos,
+  mePlayerId, mePlayer, onUpdateTeam1, onUpdateTeam2, onMarkDrive1, onMarkShot1, onMarkDrive2, onMarkShot2, onNext,
+}) {
+  const liveYards = hole.greenLat != null && livePos ? haversineYards(livePos.lat, livePos.lon, hole.greenLat, hole.greenLon) : null;
+  const unitLabel = distanceUnit === "m" ? "m" : "y";
+  return (
+    <div style={{ padding: 12, background: C.white }}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 10, gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 12, minWidth: 0 }}>
+          <div style={{ fontFamily: serif, fontSize: 36, color: C.fairway, lineHeight: 1 }}>{hole.number}</div>
+          <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, lineHeight: 1.5 }}>
+            <div>Par <b style={{ color: C.ink, fontSize: 14 }}>{hole.par}</b></div>
+            {hole.strokeIndex ? <div>SI <b style={{ color: C.ink, fontSize: 14 }}>{hole.strokeIndex}</b></div> : null}
+          </div>
+        </div>
+        <div style={{ textAlign: "right", fontFamily: sans, fontSize: 12, color: C.turf, flexShrink: 0 }}>
+          {hole.yardage ? <div>{displayDistance(hole.yardage, distanceUnit)}{unitLabel}</div> : null}
+          {liveYards != null && (
+            <div style={{ color: C.fairway, fontWeight: 700 }}>📍 {Math.round(displayDistance(liveYards, distanceUnit))}{unitLabel}</div>
+          )}
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <BetterBallHoleCard hole={hole} teamKey="team1" teamColor={C.team1} teamLabel={solo ? "Better Ball" : "Team 1"} playerAName={pA1?.name || "A"} playerBName={pB1?.name || "B"}
+          playerAId={team1Ids[0]} playerBId={team1Ids[1]}
+          state={bbState.team1?.[hole.number]} onUpdate={onUpdateTeam1}
+          onMarkDrive={onMarkDrive1} onMarkShot={onMarkShot1}
+          livePos={livePos} distanceUnit={distanceUnit} mePlayerId={mePlayerId} meBag={mePlayer?.bag} />
+        {!solo && (
+          <BetterBallHoleCard hole={hole} teamKey="team2" teamColor={C.team2} teamLabel="Team 2" playerAName={pA2?.name || "A"} playerBName={pB2?.name || "B"}
+            playerAId={team2Ids[0]} playerBId={team2Ids[1]}
+            state={bbState.team2?.[hole.number]} onUpdate={onUpdateTeam2}
+            onMarkDrive={onMarkDrive2} onMarkShot={onMarkShot2}
+            livePos={livePos} distanceUnit={distanceUnit} mePlayerId={mePlayerId} meBag={mePlayer?.bag} />
+        )}
+      </div>
+
+      <button style={{ ...btnPrimary, width: "100%", marginTop: 12, boxSizing: "border-box" }} onClick={onNext}>
+        {isLast ? "Finish hole →" : "Next hole →"}
+      </button>
+    </div>
+  );
+}
+
 /* single "focused" hole in the per-hole stroke-play scoring view — occupies most of the
    screen while active; one compact card per selected player inside it. Direction/putts and
    shot-marking sit side by side as equal-width flex columns so neither overflows the card. */
@@ -1718,11 +1777,12 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
   const livePos = useLivePosition(step === "scoring");
   const mePlayer = players.find((p) => p.id === mePlayerId);
 
-  /* stroke-play per-hole view: holes reordered to start from the chosen tee, one hole "active"
-     (fully visible) at a time; holes before activeIdx have been stepped past and render collapsed */
+  /* per-hole scoring view (both formats): holes reordered to start from the chosen tee, one
+     hole "active" (fully visible) at a time; holes before activeIdx have been stepped past and
+     render collapsed */
   const playOrder = useMemo(() => (course ? playOrderHoles(course.holes, startHole) : []), [course, startHole]);
-  const strokeRoundComplete = format === "stroke" && activeIdx >= playOrder.length;
-  const activeHole = format === "stroke" && !strokeRoundComplete ? playOrder[activeIdx] : null;
+  const roundComplete = activeIdx >= playOrder.length;
+  const activeHole = !roundComplete ? playOrder[activeIdx] : null;
 
   useEffect(() => {
     if (!courseId && courses.length) setCourseId(courses[0].id);
@@ -1767,10 +1827,10 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
       const init = {};
       selected.forEach((pid) => { init[pid] = {}; });
       setScores(init);
-      setActiveIdx(0);
     } else {
       setBbState({ team1: {}, team2: {} });
     }
+    setActiveIdx(0);
     setStep("scoring");
   }
 
@@ -1923,15 +1983,13 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
     }
     const me = mePlayerIdRef.current;
     if (!me) { setVoiceMsg("Mark a player as ⭐ you in the Players tab first."); speak("Mark a player as you first."); return; }
-    const crs = courseRef.current;
-    const hole = formatRef.current === "stroke"
-      ? activeHoleRef.current
-      : crs ? nearestHoleByPosition(crs.holes, livePosRef.current) : null;
+    // both formats now use the same per-hole view — voice/auto-detect always target whichever
+    // hole is currently active there, not whatever GPS thinks is nearest
+    const hole = activeHoleRef.current;
     if (!hole) {
-      const msg = formatRef.current === "stroke"
-        ? "No active hole right now — the round looks finished."
-        : `Heard "${transcript}" but can't tell which hole you're on yet — enable location.`;
-      setVoiceMsg(msg); speak("Can't tell which hole you're on yet."); return;
+      setVoiceMsg("No active hole right now — the round looks finished.");
+      speak("No active hole to record for.");
+      return;
     }
 
     if (kind === "unmatched") {
@@ -1980,10 +2038,9 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
   useVoiceCaddy(voiceOn && step === "scoring", handleVoiceCommand, voiceWakeWord);
 
   /* auto shot-stop detection — scoped to "you" only, see computePendingShot/shotDetectorStep.
-     For stroke play the "current hole" is whichever hole is active in the per-hole view (the
-     player chose it), not whatever GPS thinks is nearest; better ball still shows all holes
-     at once so GPS-nearest remains the only sensible way to know which hole a shot belongs to. */
-  const currentHoleForMe = format === "stroke" ? activeHole : (course && livePos ? nearestHoleByPosition(course.holes, livePos) : null);
+     Both formats now use the same per-hole view, so the "current hole" is always whichever hole
+     is active there (the player chose it), not whatever GPS thinks is nearest. */
+  const currentHoleForMe = activeHole;
   const myPending = step === "scoring"
     ? computePendingShot({ hole: currentHoleForMe, format, mePlayerId, selected, scores, bbState, team1Ids, team2Ids })
     : null;
@@ -2129,7 +2186,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
           {format === "betterball" ? "Works as a two-ball (you and a partner sharing one team score) or a four-ball (two teams of two)." : "One to four players, each scored individually."}
         </div>
 
-        {format === "stroke" && course && course.holes.some((h) => h.number === 10) && (
+        {course && course.holes.some((h) => h.number === 10) && (
           <>
             <div style={{ fontFamily: sans, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: C.turf, margin: "14px 0 8px" }}>Starting hole</div>
             <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
@@ -2287,7 +2344,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
         );
       }
     }
-    if (strokeRoundComplete) {
+    if (roundComplete) {
       if (showHalfway) {
         rows.push(
           <div key="in" style={{ display: "flex", alignItems: "center", padding: "7px 10px", background: C.line, borderBottom: `1px solid ${C.line}`, fontFamily: mono, fontWeight: 700 }}>
@@ -2314,7 +2371,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
           <div style={{ fontFamily: serif, fontSize: 19, color: C.fairway }}>{course.name}</div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <VoiceCaddyButton voiceOn={voiceOn} setVoiceOn={setVoiceOn} voiceMsg={voiceMsg} mePlayer={mePlayer} wakeWord={voiceWakeWord} />
-            <button style={{ ...btnGhost, fontSize: 12 }} onClick={abandonRound}>← Back to setup</button>
+            <button style={headerActionBtnStyle} onClick={abandonRound}>← Back to setup</button>
           </div>
         </div>
         {resumedNotice && (
@@ -2337,7 +2394,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
           )}
           {rows}
         </div>
-        {strokeRoundComplete && (
+        {roundComplete && (
           <div style={{ marginTop: 16, textAlign: "right" }}>
             <button style={btnPrimary} onClick={finishStrokeRound}>Finish & save round</button>
           </div>
@@ -2366,10 +2423,12 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
     );
   }
 
-  /* ---- scoring: better ball ---- */
+  /* ---- scoring: better ball (per-hole focused view, same shape as stroke play) ---- */
   const pA1 = players.find((p) => p.id === team1Ids[0]), pB1 = players.find((p) => p.id === team1Ids[1]);
   const pA2 = players.find((p) => p.id === team2Ids[0]), pB2 = players.find((p) => p.id === team2Ids[1]);
   const solo = team2Ids.length === 0;
+  const totalHoles = playOrder.length;
+  const showHalfway = totalHoles === 18;
 
   function updateBB(teamKey, holeNumber, nextState) {
     setBbState((prev) => ({ ...prev, [teamKey]: { ...prev[teamKey], [holeNumber]: nextState } }));
@@ -2413,6 +2472,78 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
   }
   const t1Total = course.holes.reduce((s, h) => s + (bbHoleScore(bbState.team1?.[h.number]) || 0), 0);
   const t2Total = course.holes.reduce((s, h) => s + (bbHoleScore(bbState.team2?.[h.number]) || 0), 0);
+  function bbSubtotalFor(teamKey, holesSlice) {
+    return holesSlice.reduce((s, h) => s + (bbHoleScore(bbState[teamKey]?.[h.number]) || 0), 0);
+  }
+
+  const rows = [];
+  for (let idx = 0; idx < totalHoles; idx++) {
+    const h = playOrder[idx];
+    if (idx < activeIdx) {
+      rows.push(
+        <div
+          key={h.number}
+          onClick={() => setActiveIdx(idx)}
+          style={{ display: "flex", alignItems: "center", padding: "7px 10px", background: idx % 2 === 0 ? C.white : C.paper, borderBottom: `1px solid ${C.line}`, cursor: "pointer", fontFamily: mono }}
+        >
+          <div style={{ width: 28, fontSize: 13, fontWeight: 700, color: C.ink }}>{h.number}</div>
+          <div style={{ width: 26, fontSize: 12, color: C.turf }}>{h.par}</div>
+          <div style={{ flex: 1, minWidth: 0, textAlign: "center", fontSize: 15, fontWeight: 700, color: C.team1 }}>{bbHoleScore(bbState.team1?.[h.number]) ?? "–"}</div>
+          {!solo && <div style={{ flex: 1, minWidth: 0, textAlign: "center", fontSize: 15, fontWeight: 700, color: C.team2 }}>{bbHoleScore(bbState.team2?.[h.number]) ?? "–"}</div>}
+        </div>
+      );
+    } else if (idx === activeIdx) {
+      rows.push(
+        <BetterBallFocusedHole
+          key={h.number}
+          hole={h}
+          isLast={idx === totalHoles - 1}
+          solo={solo}
+          pA1={pA1} pB1={pB1} pA2={pA2} pB2={pB2}
+          team1Ids={team1Ids} team2Ids={team2Ids}
+          bbState={bbState}
+          distanceUnit={distanceUnit}
+          livePos={livePos}
+          mePlayerId={mePlayerId}
+          mePlayer={mePlayer}
+          onUpdateTeam1={(s) => updateBB("team1", h.number, s)}
+          onUpdateTeam2={(s) => updateBB("team2", h.number, s)}
+          onMarkDrive1={(who) => markDriveForBB("team1", h, who, bbState.team1?.[h.number], who === "A" ? pA1?.name : pB1?.name)}
+          onMarkShot1={(who, roundIdx) => markNextShotForBB("team1", h, who, roundIdx, who === "A" ? pA1?.name : pB1?.name)}
+          onMarkDrive2={(who) => markDriveForBB("team2", h, who, bbState.team2?.[h.number], who === "A" ? pA2?.name : pB2?.name)}
+          onMarkShot2={(who, roundIdx) => markNextShotForBB("team2", h, who, roundIdx, who === "A" ? pA2?.name : pB2?.name)}
+          onNext={() => setActiveIdx((i) => Math.min(i + 1, totalHoles))}
+        />
+      );
+    }
+    if (idx === 8 && showHalfway && idx < activeIdx) {
+      rows.push(
+        <div key="out" style={{ display: "flex", alignItems: "center", padding: "7px 10px", background: C.line, borderBottom: `1px solid ${C.line}`, fontFamily: mono, fontWeight: 700 }}>
+          <div style={{ width: 54, fontSize: 12, color: C.fairwayDark }}>OUT</div>
+          <div style={{ flex: 1, minWidth: 0, textAlign: "center", fontSize: 13, color: C.team1 }}>{bbSubtotalFor("team1", playOrder.slice(0, 9))}</div>
+          {!solo && <div style={{ flex: 1, minWidth: 0, textAlign: "center", fontSize: 13, color: C.team2 }}>{bbSubtotalFor("team2", playOrder.slice(0, 9))}</div>}
+        </div>
+      );
+    }
+  }
+  if (roundComplete) {
+    if (showHalfway) {
+      rows.push(
+        <div key="in" style={{ display: "flex", alignItems: "center", padding: "7px 10px", background: C.line, borderBottom: `1px solid ${C.line}`, fontFamily: mono, fontWeight: 700 }}>
+          <div style={{ width: 54, fontSize: 12, color: C.fairwayDark }}>IN</div>
+          <div style={{ flex: 1, minWidth: 0, textAlign: "center", fontSize: 13, color: C.team1 }}>{bbSubtotalFor("team1", playOrder.slice(9))}</div>
+          {!solo && <div style={{ flex: 1, minWidth: 0, textAlign: "center", fontSize: 13, color: C.team2 }}>{bbSubtotalFor("team2", playOrder.slice(9))}</div>}
+        </div>
+      );
+    }
+    rows.push(
+      <div key="total" style={{ display: "flex", alignItems: "center", padding: "9px 10px", background: C.fairway, fontFamily: mono, fontWeight: 700 }}>
+        <div style={{ width: 54, fontSize: 12, color: C.white }}>TOTAL</div>
+        <div style={{ flex: 1, minWidth: 0, textAlign: "center", fontSize: 15, color: C.white }}>{t1Total}</div>
+        {!solo && <div style={{ flex: 1, minWidth: 0, textAlign: "center", fontSize: 15, color: C.white }}>{t2Total}</div>}
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -2420,7 +2551,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
         <div style={{ fontFamily: serif, fontSize: 19, color: C.fairway }}>{course.name} — Better Ball</div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <VoiceCaddyButton voiceOn={voiceOn} setVoiceOn={setVoiceOn} voiceMsg={voiceMsg} mePlayer={mePlayer} wakeWord={voiceWakeWord} />
-          <button style={{ ...btnGhost, fontSize: 12 }} onClick={abandonRound}>← Back to setup</button>
+          <button style={headerActionBtnStyle} onClick={abandonRound}>← Back to setup</button>
         </div>
       </div>
       {resumedNotice && (
@@ -2440,34 +2571,20 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
         )}
         <div style={{ marginTop: 4 }}>Better-ball rounds are logged in history but don't count toward individual handicap index.</div>
       </div>
-      <div style={{ display: "grid", gap: 14 }}>
-        {course.holes.map((h) => (
-          <div key={h.number}>
-            <div style={{ fontFamily: sans, fontSize: 12, fontWeight: 700, color: C.ink, marginBottom: 4 }}>
-              Hole {h.number} · Par {h.par}{h.yardage ? ` · ${displayDistance(h.yardage, distanceUnit)} ${distanceUnit === "m" ? "m" : "yds"}` : ""}
-            </div>
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-              <BetterBallHoleCard hole={h} teamKey="team1" teamColor={C.team1} teamLabel={solo ? "Better Ball" : "Team 1"} playerAName={pA1?.name || "A"} playerBName={pB1?.name || "B"}
-                playerAId={team1Ids[0]} playerBId={team1Ids[1]}
-                state={bbState.team1?.[h.number]} onUpdate={(s) => updateBB("team1", h.number, s)}
-                onMarkDrive={(who) => markDriveForBB("team1", h, who, bbState.team1?.[h.number], who === "A" ? pA1?.name : pB1?.name)}
-                onMarkShot={(who, roundIdx) => markNextShotForBB("team1", h, who, roundIdx, who === "A" ? pA1?.name : pB1?.name)}
-                livePos={livePos} distanceUnit={distanceUnit} mePlayerId={mePlayerId} meBag={mePlayer?.bag} />
-              {!solo && (
-                <BetterBallHoleCard hole={h} teamKey="team2" teamColor={C.team2} teamLabel="Team 2" playerAName={pA2?.name || "A"} playerBName={pB2?.name || "B"}
-                  playerAId={team2Ids[0]} playerBId={team2Ids[1]}
-                  state={bbState.team2?.[h.number]} onUpdate={(s) => updateBB("team2", h.number, s)}
-                  onMarkDrive={(who) => markDriveForBB("team2", h, who, bbState.team2?.[h.number], who === "A" ? pA2?.name : pB2?.name)}
-                  onMarkShot={(who, roundIdx) => markNextShotForBB("team2", h, who, roundIdx, who === "A" ? pA2?.name : pB2?.name)}
-                  livePos={livePos} distanceUnit={distanceUnit} mePlayerId={mePlayerId} meBag={mePlayer?.bag} />
-              )}
-            </div>
-          </div>
-        ))}
+      <div style={{ border: `1px solid ${C.line}`, borderRadius: 8, overflow: "hidden" }}>
+        <div style={{ display: "flex", alignItems: "center", padding: "6px 10px", background: C.fairway, fontFamily: sans, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.03em" }}>
+          <div style={{ width: 28, color: C.white }}>#</div>
+          <div style={{ width: 26 }} />
+          <div style={{ flex: 1, minWidth: 0, textAlign: "center", color: C.white }}>{solo ? "Better Ball" : "Team 1"}</div>
+          {!solo && <div style={{ flex: 1, minWidth: 0, textAlign: "center", color: C.white }}>Team 2</div>}
+        </div>
+        {rows}
       </div>
-      <div style={{ marginTop: 16, textAlign: "right" }}>
-        <button style={btnPrimary} onClick={finishBetterBallRound}>Finish & save round</button>
-      </div>
+      {roundComplete && (
+        <div style={{ marginTop: 16, textAlign: "right" }}>
+          <button style={btnPrimary} onClick={finishBetterBallRound}>Finish & save round</button>
+        </div>
+      )}
       {driveModal && (
         <DriveMapModal
           hole={driveModal.hole}
