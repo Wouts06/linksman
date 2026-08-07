@@ -52,8 +52,13 @@ Either way, add the deployed site to your phone's home screen afterward (share m
 ## Course data: OpenStreetMap
 
 The Courses tab can search OpenStreetMap directly (Nominatim for location, Overpass for
-hole-by-hole geometry) — free, no API key. Coverage depends on whether volunteers have
-mapped that specific course in detail:
+hole-by-hole geometry) — free, no API key. You can search by name, or tap **📍 Find courses
+near me** to list every golf course OpenStreetMap has mapped within ~25 miles of your current
+GPS position, closest first — useful when you don't know (or can't spell) the exact course
+name. This uses a direct Overpass geographic query (`api/osm-nearby.js`) rather than
+Nominatim's name search, but feeds results through the exact same flow as a name search from
+there on, including hole-data download and caching (see below). Coverage depends on whether
+volunteers have mapped that specific course in detail:
 
 - **Well-mapped courses** — you'll get real par, stroke index, and yardage per hole,
   computed from the mapped hole centerlines.
@@ -65,9 +70,10 @@ mapped that specific course in detail:
 Because this relies on public OpenStreetMap data, be considerate with request volume —
 it's shared free infrastructure, fine for personal use as-is.
 
-**Server-side proxy (added 6 Aug):** the browser never talks to Nominatim/Overpass directly.
-Both calls go through this app's own `/api/osm-search` and `/api/osm-holes` serverless
-functions (in the `api/` folder), which forward the request server-side with a real,
+**Server-side proxy (added 6 Aug, extended 8 Aug):** the browser never talks to
+Nominatim/Overpass directly. All calls go through this app's own `/api/osm-search`,
+`/api/osm-holes`, and `/api/osm-nearby` serverless functions (in the `api/` folder), which
+forward the request server-side with a real,
 identifying `User-Agent` header. This exists because a browser's JS `fetch()` can never set
 a custom `User-Agent` at all (a hard browser restriction), and unidentified requests from a
 generic `*.vercel.app`/`*.netlify.app` domain were found to get silently blocked by these

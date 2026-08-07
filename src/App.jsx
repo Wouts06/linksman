@@ -347,6 +347,44 @@ async function searchOSMCourses(query) {
   }));
 }
 
+/* "Find courses near me" — Overpass direct geographic search (leisure=golf_course within a
+   radius), as an alternative to searching by name. Returns candidates in the same shape
+   searchOSMCourses does (including a boundingbox), so callers can feed a result straight into
+   the existing pickOSMResult() flow — that's what actually fetches + caches the hole-by-hole
+   data for later use, exactly like a name-search result does. */
+async function searchOSMNearby(lat, lon, radiusMeters) {
+  const url = `/api/osm-nearby?lat=${lat}&lon=${lon}&radius=${radiusMeters}`;
+  const res = await fetchWithTimeout(url, { headers: { Accept: "application/json" } }, 20000);
+  if (!res.ok) throw new Error("Nearby course search failed");
+  const data = await res.json();
+  const elements = (data && data.elements) || [];
+  return elements
+    .map((el) => {
+      const elLat = el.lat ?? el.center?.lat;
+      const elLon = el.lon ?? el.center?.lon;
+      if (elLat == null || elLon == null) return null;
+      const name = (el.tags && el.tags.name) || "Unnamed golf course";
+      // Overpass's `out center;` gives a single point, not a real bounding box — golf courses
+      // are rarely more than ~3km across, so a generous fixed pad around the center comfortably
+      // covers the whole course for the subsequent hole-by-hole lookup.
+      const latPad = 0.02;
+      const lonPad = 0.02 / Math.max(Math.cos((elLat * Math.PI) / 180), 0.15);
+      return {
+        osmType: el.type,
+        osmId: el.id,
+        name,
+        displayName: name,
+        lat: elLat,
+        lon: elLon,
+        distanceMi: haversine(lat, lon, elLat, elLon),
+        boundingbox: [elLat - latPad, elLat + latPad, elLon - lonPad, elLon + lonPad],
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.distanceMi - b.distanceMi)
+    .slice(0, 20);
+}
+
 async function fetchWithTimeout(url, options, timeoutMs) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
@@ -685,6 +723,16 @@ const inputStyle = {
   width: "100%", padding: "11px 12px", border: `1px solid ${C.line}`, borderRadius: 5,
   background: C.white, fontFamily: sans, fontSize: 16, color: C.ink, boxSizing: "border-box",
 };
+/* <select> elements render with their own native height/padding on many mobile browsers
+   even with identical CSS to a text input — this normalizes them so dropdowns line up
+   with neighboring text fields instead of looking shorter/misaligned */
+const selectStyle = {
+  ...inputStyle,
+  appearance: "none", WebkitAppearance: "none", MozAppearance: "none",
+  height: 44, lineHeight: "20px",
+  backgroundImage: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M0 0l5 6 5-6z' fill='%234b5d4a'/></svg>\")",
+  backgroundRepeat: "no-repeat", backgroundPosition: "right 12px center", paddingRight: 30,
+};
 const btnPrimary = {
   background: C.fairway, color: C.white, border: "none", borderRadius: 6, padding: "13px 20px",
   fontFamily: sans, fontSize: 16, fontWeight: 600, cursor: "pointer",
@@ -722,6 +770,8 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
   const [lastOSMCandidate, setLastOSMCandidate] = useState(null);
   const [osmCache, setOsmCache] = useState(() => loadOSMCache());
   const [osmFromCache, setOsmFromCache] = useState(false);
+  const [showManualHelpers, setShowManualHelpers] = useState(false);
+  const [nearbyLoading, setNearbyLoading] = useState(false);
 
   function cacheOSMHoles(key, holes) {
     const entry = { holes, cachedAt: Date.now() };
@@ -751,6 +801,30 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
       setOsmStatus("Couldn't reach OpenStreetMap right now — set the pin manually below.");
     }
     setOsmLoading(false);
+  }
+
+  const NEARBY_RADIUS_METERS = 40000; // ~25 miles
+
+  async function findNearby() {
+    let loc = location;
+    if (!loc) {
+      loc = await requestLocation();
+      if (!loc) {
+        setOsmStatus("Couldn't get your location — check location permissions and try again, or search by name instead.");
+        return;
+      }
+    }
+    setNearbyLoading(true); setOsmStatus(""); setOsmResults([]); setOsmFailed(false);
+    try {
+      const results = await searchOSMNearby(loc.lat, loc.lon, NEARBY_RADIUS_METERS);
+      setOsmResults(results);
+      if (results.length === 0) {
+        setOsmStatus("No golf courses found on OpenStreetMap within 25 miles of you — try searching by name instead.");
+      }
+    } catch (e) {
+      setOsmStatus("Couldn't reach OpenStreetMap right now — try again in a moment, or search by name.");
+    }
+    setNearbyLoading(false);
   }
 
   async function pickOSMResult(candidate) {
@@ -893,7 +967,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
           <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr", gap: 12 }}>
             <Field label="Course name"><input style={inputStyle} value={name} onChange={(e) => setName(e.target.value)} /></Field>
             <Field label="Holes">
-              <select style={inputStyle} value={numHoles} onChange={(e) => updateHoleCount(Number(e.target.value))}>
+              <select style={selectStyle} value={numHoles} onChange={(e) => updateHoleCount(Number(e.target.value))}>
                 <option value={9}>9</option>
                 <option value={18}>18</option>
               </select>
@@ -908,8 +982,11 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
             </div>
             <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
               <input style={inputStyle} placeholder="Course name + city" value={osmQuery} onChange={(e) => setOsmQuery(e.target.value)} onKeyDown={(e) => e.key === "Enter" && searchOSM()} />
-              <button style={{ ...btnGhost, flexShrink: 0 }} onClick={searchOSM} disabled={osmLoading}>{osmLoading ? "…" : "Search"}</button>
+              <button style={{ ...btnGhost, flexShrink: 0 }} onClick={searchOSM} disabled={osmLoading || nearbyLoading}>{osmLoading ? "…" : "Search"}</button>
             </div>
+            <button style={{ ...btnGhost, fontSize: 12, padding: "8px 12px", width: "100%", boxSizing: "border-box", marginBottom: 8 }} onClick={findNearby} disabled={osmLoading || nearbyLoading}>
+              {nearbyLoading ? "Finding courses near you…" : "📍 Find courses near me"}
+            </button>
             {osmResults.length > 0 && (
               <div style={{ display: "grid", gap: 6, marginBottom: 8 }}>
                 {osmResults.map((r, i) => {
@@ -918,7 +995,10 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
                     <div key={i} onClick={() => pickOSMResult(r)} style={{ ...cardStyle, cursor: "pointer", padding: "8px 12px" }}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
                         <div style={{ fontFamily: sans, fontWeight: 700, fontSize: 13, color: C.fairway }}>{r.name}</div>
-                        {cached && <span title={`Cached ${new Date(cached.cachedAt).toLocaleDateString()} — loads instantly, no network needed`} style={{ fontSize: 11, color: C.turf, fontFamily: sans, flexShrink: 0 }}>🗄 cached</span>}
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexShrink: 0 }}>
+                          {r.distanceMi != null && <span style={{ fontSize: 11, color: C.turf, fontFamily: sans }}>{r.distanceMi.toFixed(1)} mi</span>}
+                          {cached && <span title={`Cached ${new Date(cached.cachedAt).toLocaleDateString()} — loads instantly, no network needed`} style={{ fontSize: 11, color: C.turf, fontFamily: sans }}>🗄 cached</span>}
+                        </div>
                       </div>
                       <div style={{ fontFamily: sans, fontSize: 11, color: C.turf }}>{r.displayName}</div>
                     </div>
@@ -934,13 +1014,27 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
             )}
           </div>
 
-          <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, marginBottom: 4 }}>
-            Or set the pin manually: search the course on Google Maps, then copy the latitude/longitude from the URL (right-click the pin → "What's here?") into the fields below.
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8, marginBottom: showManualHelpers ? 8 : 4 }}>
+            <div style={{ fontFamily: sans, fontSize: 12, color: C.turf }}>
+              Or set the pin manually: enter latitude/longitude below.
+            </div>
+            <button
+              title="More options — search Google Maps or use your current location"
+              onClick={() => setShowManualHelpers(!showManualHelpers)}
+              style={{
+                flexShrink: 0, background: "transparent", border: `1px solid ${C.line}`, borderRadius: 5,
+                width: 28, height: 28, cursor: "pointer", color: C.turf, fontSize: 16, lineHeight: "26px", padding: 0,
+              }}
+            >
+              ⋯
+            </button>
           </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 10, flexWrap: "wrap" }}>
-            <button style={{ ...btnGhost, padding: "8px 12px", fontSize: 12 }} onClick={openInMaps}>🔍 Search "{name.trim() || "course name"}" on Google Maps ↗</button>
-            <button style={{ ...btnGhost, padding: "8px 12px", fontSize: 12 }} onClick={useMyLocation}>Use my current location instead</button>
-          </div>
+          {showManualHelpers && (
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 10, flexWrap: "wrap" }}>
+              <button style={{ ...btnGhost, padding: "8px 12px", fontSize: 12 }} onClick={openInMaps}>🔍 Search "{name.trim() || "course name"}" on Google Maps ↗</button>
+              <button style={{ ...btnGhost, padding: "8px 12px", fontSize: 12 }} onClick={useMyLocation}>Use my current location instead</button>
+            </div>
+          )}
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 10 }}>
             <Field label="Latitude">
               <input style={inputStyle} type="number" step="any" placeholder="e.g. 33.5031" value={manualLat} onChange={(e) => setManualLat(e.target.value)} />
