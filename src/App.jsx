@@ -1464,7 +1464,7 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
   const liveLabel = score != null ? score : s.onGreen ? `${s.rounds.length}+` : `${s.rounds.length}`;
 
   return (
-    <div style={{ border: `1px solid ${C.line}`, borderRadius: 8, padding: "10px 12px", background: C.white, flex: 1, minWidth: 290 }}>
+    <div style={{ border: `1px solid ${C.line}`, borderRadius: 8, padding: "10px 12px", background: C.white, flex: 1, minWidth: 260, maxWidth: "100%", boxSizing: "border-box" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
         <div style={{ fontFamily: sans, fontWeight: 700, fontSize: 13, color: teamColor, textTransform: "uppercase", letterSpacing: "0.04em" }}>{teamLabel}</div>
         <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
