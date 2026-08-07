@@ -395,8 +395,14 @@ async function fetchWithTimeout(url, options, timeoutMs) {
   }
 }
 
+/* how much real data a parsed hole carries — used to pick a winner when the same hole number
+   shows up more than once (see dedup note in parseOSMHoleElements below) */
+function holeCompleteness(h) {
+  return [h.par, h.strokeIndex, h.yardageMeters, h.teeLat, h.greenLat].filter((v) => v != null).length;
+}
+
 function parseOSMHoleElements(data) {
-  return (data.elements || [])
+  const parsed = (data.elements || [])
     .map((el) => {
       const tags = el.tags || {};
       const geom = el.geometry || [];
@@ -414,18 +420,43 @@ function parseOSMHoleElements(data) {
         greenLon: green?.lon ?? null,
       };
     })
-    .filter((h) => h.number != null && !isNaN(h.number))
-    .sort((a, b) => a.number - b.number);
+    .filter((h) => h.number != null && !isNaN(h.number));
+
+  // A bounding-box (or, occasionally, an area) query can pick up `golf=hole` ways belonging to
+  // a different, geographically close course that happens to number its holes the same way —
+  // seen in practice as a course reporting double (or a handful extra) the holes it actually
+  // has. Dedupe by hole number, keeping whichever candidate has more real data, so a stray
+  // duplicate never inflates the hole count or silently overwrites a fully-mapped hole with a
+  // bare one.
+  const byNumber = new Map();
+  for (const h of parsed) {
+    const existing = byNumber.get(h.number);
+    if (!existing || holeCompleteness(h) > holeCompleteness(existing)) byNumber.set(h.number, h);
+  }
+  return [...byNumber.values()].sort((a, b) => a.number - b.number);
 }
 
 /* throws (rather than silently returning []) when the lookup fails, so the caller can
    tell "this course genuinely has no mapped holes" apart from "the service is down/busy".
    The mirror-fallback logic now lives server-side in api/osm-holes.js — this just calls that
-   one same-origin endpoint. */
-async function fetchOSMHoles(boundingbox) {
-  if (!boundingbox) return [];
-  const [south, north, west, east] = boundingbox;
-  const url = `/api/osm-holes?south=${south}&north=${north}&west=${west}&east=${east}`;
+   one same-origin endpoint.
+   Pass the full OSM candidate (osmType/osmId + boundingbox), not just the boundingbox — when
+   the candidate is a way/relation (i.e. has real mapped geometry, not just a point), the
+   server restricts the search to holes within that specific course's own area instead of a
+   bounding box, which otherwise can sweep in a nearby course's holes (see api/osm-holes.js). */
+async function fetchOSMHoles(candidate) {
+  const boundingbox = candidate?.boundingbox;
+  if (!boundingbox && !(candidate?.osmType && candidate?.osmId != null)) return [];
+  const params = new URLSearchParams();
+  if (candidate?.osmType && candidate?.osmId != null) {
+    params.set("osmType", candidate.osmType);
+    params.set("osmId", String(candidate.osmId));
+  }
+  if (boundingbox) {
+    const [south, north, west, east] = boundingbox;
+    params.set("south", south); params.set("north", north); params.set("west", west); params.set("east", east);
+  }
+  const url = `/api/osm-holes?${params.toString()}`;
   try {
     const res = await fetchWithTimeout(url, {}, 20000);
     if (!res.ok) {
@@ -712,7 +743,10 @@ function Tab({ label, active, onClick }) {
 function Field({ label, children }) {
   return (
     <label style={{ display: "block", marginBottom: 12 }}>
-      <div style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.05em", color: C.turf, marginBottom: 5, fontFamily: sans }}>
+      {/* fixed 2-line height regardless of actual label length — otherwise a short label like
+          "Holes" sits on one line while a neighboring label like "Rating (optional)" wraps to
+          two in a narrow grid column, and their inputs end up starting at different heights */}
+      <div style={{ fontSize: 12, textTransform: "uppercase", letterSpacing: "0.05em", color: C.turf, marginBottom: 5, fontFamily: sans, lineHeight: "14px", minHeight: 28, display: "flex", alignItems: "flex-end" }}>
         {label}
       </div>
       {children}
@@ -844,7 +878,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
       return;
     }
     try {
-      const osmHoles = await fetchOSMHoles(candidate.boundingbox);
+      const osmHoles = await fetchOSMHoles(candidate);
       cacheOSMHoles(key, osmHoles); // cache successes AND genuine zero-result answers — never cache a failure
       applyOSMHoles(osmHoles, null);
     } catch (e) {
@@ -894,7 +928,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
     setOsmFromCache(false);
     setOsmStatus("Checking OpenStreetMap…");
     try {
-      const osmHoles = await fetchOSMHoles(lastOSMCandidate.boundingbox);
+      const osmHoles = await fetchOSMHoles(lastOSMCandidate);
       cacheOSMHoles(osmCacheKey(lastOSMCandidate), osmHoles);
       applyOSMHoles(osmHoles, null);
     } catch (e) {
