@@ -763,7 +763,10 @@ const inputStyle = {
 const selectStyle = {
   ...inputStyle,
   appearance: "none", WebkitAppearance: "none", MozAppearance: "none",
-  height: 44, lineHeight: "20px",
+  // No explicit height/line-height here on purpose — with native appearance stripped and the
+  // same padding/border/font-size/box-sizing as inputStyle, the box model alone produces the
+  // same height as a sibling text input. An earlier fixed height (44px) was a rounding guess
+  // that ended up 2-3px taller than the real computed input height on the user's device.
   backgroundImage: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M0 0l5 6 5-6z' fill='%234b5d4a'/></svg>\")",
   backgroundRepeat: "no-repeat", backgroundPosition: "right 12px center", paddingRight: 30,
 };
