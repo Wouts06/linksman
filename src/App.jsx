@@ -129,6 +129,12 @@ function matchClubFromSpeech(transcript) {
 function heardWakeWord(transcript) {
   return /gaddy|caddy|caddie/i.test(transcript || "");
 }
+/* "Hey Gaddy, record shot" (or "log/mark shot") — a separate command from naming a club,
+   checked before club-matching so "record shot" alone (no club name) still does something. */
+function heardRecordShotCommand(transcript) {
+  const t = (transcript || "").toLowerCase();
+  return /\b(record|log|mark)\s+(my\s+|this\s+)?shot\b/.test(t);
+}
 function speak(text) {
   if (typeof window === "undefined" || !window.speechSynthesis) return;
   try {
@@ -162,8 +168,19 @@ function suggestClub(bag, remainingYards) {
   return best ? best.club : null;
 }
 
-/* always-listening "Hey Gaddy" voice caddy — wake word + club name, active only while `active` is true */
-function useVoiceCaddy(active, onClubHeard) {
+/* always-listening "Hey Gaddy" voice caddy — wake word + a club name or "record shot" command,
+   active only while `active` is true.
+   onCommand(kind, payload, transcript) fires for every utterance that contains the wake word,
+   with kind one of:
+     "club"       — payload is the matched club name, e.g. "6 Iron"
+     "recordShot" — "record/log/mark shot" heard, no club named
+     "unmatched"  — wake word heard but nothing after it was recognized as a club or command.
+   Reporting "unmatched" (rather than silently doing nothing) is deliberate: earlier versions
+   only ever called back on a successful club match, so a mis-transcribed or unsupported phrase
+   looked identical to the mic simply not picking anything up — genuinely confusing to debug from
+   the outside. Surfacing every wake-word-containing transcript, matched or not, lets the on-screen
+   voiceMsg show exactly what the recognizer heard, so misfires are visible instead of silent. */
+function useVoiceCaddy(active, onCommand) {
   const recRef = useRef(null);
   const activeRef = useRef(active);
   useEffect(() => { activeRef.current = active; }, [active]);
@@ -178,8 +195,10 @@ function useVoiceCaddy(active, onClubHeard) {
     rec.onresult = (e) => {
       const transcript = e.results[e.results.length - 1][0].transcript;
       if (!heardWakeWord(transcript)) return;
+      if (heardRecordShotCommand(transcript)) { onCommand("recordShot", null, transcript); return; }
       const club = matchClubFromSpeech(transcript);
-      if (club) onClubHeard(club, transcript);
+      if (club) { onCommand("club", club, transcript); return; }
+      onCommand("unmatched", null, transcript);
     };
     rec.onerror = () => {};
     rec.onend = () => { if (activeRef.current) { try { rec.start(); } catch {} } };
@@ -191,6 +210,78 @@ function useVoiceCaddy(active, onClubHeard) {
 function voiceSupported() {
   return typeof window !== "undefined" && !!(window.SpeechRecognition || window.webkitSpeechRecognition);
 }
+
+/* ---------- automatic shot-stop detection ----------
+   Heuristic: while a player carries their phone, GPS sits roughly still at the tee (or wherever
+   their last shot was marked), then moves as they walk/ride toward their ball, then goes roughly
+   still again once they arrive. "Moved away far enough, then stayed put for a few seconds" is
+   treated as "you've probably reached your ball" and offered up as a one-tap prompt to mark a
+   shot there, instead of requiring a manual "Mark drive" tap every time.
+   This can only sense the phone carrier's own movement — it has no way to know when a different
+   player in the group hits their shot — so it's intentionally scoped to whichever player is
+   marked ⭐ "you" only. Other players' shots still get marked by hand, same as before.
+   The detection logic is a pure function (shotDetectorStep) with no side effects, kept separate
+   from the React hook so it can be unit tested with synthetic GPS sample sequences — genuinely
+   useful here since this sandbox has no way to test against a real phone's GPS. The three
+   constants below are the only tuning knobs; if real-world testing shows too many/few prompts,
+   these are what to adjust first. */
+const SHOT_MOVE_AWAY_YARDS = 25;  // must get at least this far from the anchor to count as "walking to the ball"
+const SHOT_STOP_RADIUS_YARDS = 8; // consecutive samples must stay within this radius of each other to count as "stopped"
+const SHOT_STOP_WINDOW_MS = 6000; // …for at least this many milliseconds before we treat it as arrived
+
+function shotDetectorInit(anchor) {
+  return { anchor, movedAway: false, stillSince: null, stillAt: null, fired: false, stoppedAt: null };
+}
+
+function shotDetectorStep(state, sample) {
+  if (!state || !state.anchor || state.fired) return state;
+  const distFromAnchor = haversineYards(state.anchor.lat, state.anchor.lon, sample.lat, sample.lon);
+  if (distFromAnchor == null) return state;
+
+  if (!state.movedAway) {
+    if (distFromAnchor >= SHOT_MOVE_AWAY_YARDS) {
+      return { ...state, movedAway: true, stillSince: sample.t, stillAt: sample };
+    }
+    return state;
+  }
+
+  if (!state.stillAt) return { ...state, stillSince: sample.t, stillAt: sample };
+  const distFromStill = haversineYards(state.stillAt.lat, state.stillAt.lon, sample.lat, sample.lon);
+  if (distFromStill != null && distFromStill > SHOT_STOP_RADIUS_YARDS) {
+    // still moving — restart the "have we stopped" window from this new spot
+    return { ...state, stillSince: sample.t, stillAt: sample };
+  }
+  if (sample.t - state.stillSince >= SHOT_STOP_WINDOW_MS) {
+    return { ...state, fired: true, stoppedAt: { lat: sample.lat, lon: sample.lon } };
+  }
+  return state;
+}
+
+/* thin React wrapper around the pure reducer above — feeds live GPS samples in, exposes
+   whether a "stopped after moving" event has fired, and a reset() to start watching again
+   from a new anchor point (called once a shot is marked, or the tracked hole changes). */
+function useShotStopDetector(active, livePos, anchor) {
+  const anchorKey = anchor ? `${anchor.lat.toFixed(6)},${anchor.lon.toFixed(6)}` : null;
+  const [state, setState] = useState(() => shotDetectorInit(anchor));
+  const lastAnchorKeyRef = useRef(anchorKey);
+  useEffect(() => {
+    if (anchorKey !== lastAnchorKeyRef.current) {
+      lastAnchorKeyRef.current = anchorKey;
+      setState(shotDetectorInit(anchor));
+    }
+  }, [anchorKey]);
+  useEffect(() => {
+    if (!active || !livePos || !anchor) return;
+    setState((prev) => shotDetectorStep(prev, { lat: livePos.lat, lon: livePos.lon, t: Date.now() }));
+  }, [active, livePos?.lat, livePos?.lon, anchor]);
+  function reset() { lastAnchorKeyRef.current = anchorKey; setState(shotDetectorInit(anchor)); }
+  return { fired: !!state.fired, stoppedAt: state.stoppedAt, reset };
+}
+
+/* localStorage key for the round currently being scored — persisted continuously so an
+   accidental tab/app close doesn't lose an in-progress round (only while actively scoring;
+   the setup screen and finished rounds never persist here). */
+const ACTIVE_ROUND_KEY = "golf:activeRound";
 
 /* local cache of Overpass hole lookups, keyed by the OSM place's stable id — once a course's
    hole data has been fetched successfully (from any browser tab, ever), re-selecting it in a
@@ -434,37 +525,45 @@ function MapClickCapture({ onPick }) {
   return null;
 }
 
-function DriveMapModal({ hole, label, distanceUnit, onSave, onCancel }) {
-  const [pos, setPos] = useState(null);
-  const hasBoth = hole.teeLat != null && hole.greenLat != null;
+function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, distanceUnit, onSave, onCancel }) {
+  const [pos, setPos] = useState(initialPos || null);
+  const shotWord = shotLabel || "drive";
+  /* "from" point to measure this shot's own distance from — the tee for the first shot on a
+     hole, or wherever the previous shot was marked for anything after that (passed in by the
+     caller via fromLat/fromLon; falls back to the tee for backward compatibility). */
+  const anchorLat = fromLat ?? hole.teeLat;
+  const anchorLon = fromLon ?? hole.teeLon;
+  const hasBoth = anchorLat != null && hole.greenLat != null;
   const center = hasBoth
-    ? [(hole.teeLat + hole.greenLat) / 2, (hole.teeLon + hole.greenLon) / 2]
-    : [hole.teeLat ?? hole.greenLat, hole.teeLon ?? hole.greenLon];
-  const driveYards = pos && hole.teeLat != null ? haversineYards(hole.teeLat, hole.teeLon, pos.lat, pos.lng) : null;
+    ? [(anchorLat + hole.greenLat) / 2, (anchorLon + hole.greenLon) / 2]
+    : [anchorLat ?? hole.greenLat, anchorLon ?? hole.greenLon];
+  const shotYards = pos && anchorLat != null ? haversineYards(anchorLat, anchorLon, pos.lat, pos.lng) : null;
   const remainYards = pos && hole.greenLat != null ? haversineYards(pos.lat, pos.lng, hole.greenLat, hole.greenLon) : null;
   const unitLabel = distanceUnit === "m" ? "m" : "yd";
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(20,20,16,0.55)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 14 }}>
       <div style={{ background: C.paper, borderRadius: 10, padding: 16, width: "100%", maxWidth: 480, maxHeight: "92vh", overflow: "auto" }}>
-        <div style={{ fontFamily: serif, fontSize: 16, color: C.fairway, marginBottom: 4 }}>Mark {label}'s drive</div>
-        <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, marginBottom: 10 }}>Tap the map where the ball landed.</div>
+        <div style={{ fontFamily: serif, fontSize: 16, color: C.fairway, marginBottom: 4 }}>Mark {label}'s {shotWord}</div>
+        <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, marginBottom: 10 }}>
+          {initialPos ? "Pin dropped at your current GPS location — tap the map to adjust it, then save." : "Tap the map where the ball landed."}
+        </div>
         <div style={{ height: 320, borderRadius: 6, overflow: "hidden", border: `1px solid ${C.line}` }}>
           <MapContainer center={center} zoom={17} style={{ height: "100%", width: "100%" }}>
             <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap contributors" />
-            {hole.teeLat != null && <Marker position={[hole.teeLat, hole.teeLon]} icon={teeIcon} />}
+            {anchorLat != null && <Marker position={[anchorLat, anchorLon]} icon={teeIcon} />}
             {hole.greenLat != null && <Marker position={[hole.greenLat, hole.greenLon]} icon={greenIcon} />}
             {pos && <Marker position={pos} icon={landingIcon} />}
             <MapClickCapture onPick={setPos} />
           </MapContainer>
         </div>
         <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, margin: "8px 0" }}>
-          <span style={{ color: C.fairway, fontWeight: 700 }}>◎</span> Tee &nbsp;·&nbsp; <span style={{ color: C.turf, fontWeight: 700 }}>●</span> Green &nbsp;·&nbsp; <span style={{ color: C.flag, fontWeight: 700 }}>●</span> Where you tapped
+          <span style={{ color: C.fairway, fontWeight: 700 }}>◎</span> {fromLat != null ? "Previous shot" : "Tee"} &nbsp;·&nbsp; <span style={{ color: C.turf, fontWeight: 700 }}>●</span> Green &nbsp;·&nbsp; <span style={{ color: C.flag, fontWeight: 700 }}>●</span> Where you tapped
         </div>
         {pos ? (
           <div style={{ fontFamily: mono, fontSize: 14, color: C.ink, marginBottom: 10 }}>
-            {driveYards != null && <>Drive: <b>{Math.round(displayDistance(driveYards, distanceUnit))} {unitLabel}</b></>}
-            {driveYards != null && remainYards != null && " · "}
+            {shotYards != null && <>This shot: <b>{Math.round(displayDistance(shotYards, distanceUnit))} {unitLabel}</b></>}
+            {shotYards != null && remainYards != null && " · "}
             {remainYards != null && <>Remaining to green: <b>{Math.round(displayDistance(remainYards, distanceUnit))} {unitLabel}</b></>}
           </div>
         ) : (
@@ -472,7 +571,7 @@ function DriveMapModal({ hole, label, distanceUnit, onSave, onCancel }) {
         )}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button style={btnGhost} onClick={onCancel}>Cancel</button>
-          <button style={btnPrimary} disabled={driveYards == null} onClick={() => onSave(Math.round(driveYards), pos.lat, pos.lng)}>Save</button>
+          <button style={btnPrimary} disabled={!pos} onClick={() => onSave(shotYards != null ? Math.round(shotYards) : null, pos.lat, pos.lng, remainYards)}>Save</button>
         </div>
       </div>
     </div>
@@ -484,7 +583,7 @@ function VoiceCaddyButton({ voiceOn, setVoiceOn, voiceMsg, mePlayer }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
       <button
-        title={!supported ? "Voice control needs a browser with speech recognition (Chrome works best)" : !mePlayer ? "Mark a player as ⭐ you in the Players tab first" : voiceOn ? "Listening for \"Hey Gaddy, I'm using a...\"" : "Turn on voice caddy"}
+        title={!supported ? "Voice control needs a browser with speech recognition (Chrome works best)" : !mePlayer ? "Mark a player as ⭐ you in the Players tab first" : voiceOn ? "Listening for \"Hey Gaddy, I'm using a...\" or \"Hey Gaddy, record shot\"" : "Turn on voice caddy"}
         disabled={!supported}
         onClick={() => setVoiceOn(!voiceOn)}
         style={{
@@ -496,6 +595,30 @@ function VoiceCaddyButton({ voiceOn, setVoiceOn, voiceMsg, mePlayer }) {
         {voiceOn ? "🎙️ Listening…" : "🎙️ Voice caddy"}
       </button>
       {voiceOn && voiceMsg && <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, maxWidth: 220, textAlign: "right" }}>{voiceMsg}</div>}
+    </div>
+  );
+}
+
+/* Floating banner offered when the auto shot-stop detector thinks you've walked to your ball
+   and stopped (see shotDetectorStep above) — a one-tap alternative to hunting for the manual
+   "Mark drive"/"Mark shot" button on your own scorecard row while you're standing on the course. */
+function ShotStopPrompt({ hole, onMark, onDismiss }) {
+  return (
+    <div
+      style={{
+        position: "fixed", left: 14, right: 14, bottom: 14, zIndex: 900, maxWidth: 480, margin: "0 auto",
+        background: C.fairway, color: C.white, borderRadius: 10, padding: "12px 14px",
+        boxShadow: "0 4px 18px rgba(0,0,0,0.35)", display: "flex", justifyContent: "space-between",
+        alignItems: "center", gap: 10, flexWrap: "wrap",
+      }}
+    >
+      <div style={{ fontFamily: sans, fontSize: 13 }}>
+        Looks like you've stopped on hole {hole.number} — mark your shot here?
+      </div>
+      <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+        <button onClick={onDismiss} style={{ ...btnGhost, borderColor: "rgba(251,249,242,0.6)", color: C.white, fontSize: 12, padding: "7px 12px" }}>Not now</button>
+        <button onClick={onMark} style={{ ...btnPrimary, background: C.brass, color: C.fairwayDark, fontSize: 12, padding: "7px 14px" }}>📍 Mark it</button>
+      </div>
     </div>
   );
 }
@@ -1001,6 +1124,61 @@ function PlayersTab({ players, setPlayers, distanceUnit, mePlayerId, setMePlayer
 function defaultBBHole() {
   return { rounds: [{ continueWith: null, shapeA: null, shapeB: null }], onGreen: false, puttMode: null, betterPutts: "", ownPutts: { A: "", B: "" } };
 }
+
+/* Works out, for whichever player is marked ⭐ "you", which shot (if any) is next to record —
+   the tee shot if it hasn't been marked yet, otherwise the first not-yet-marked shot after that
+   for whichever ball they're currently playing. Used both to anchor the auto shot-stop detector
+   and to figure out what "Hey Gaddy, record shot" should do. Pure function (all inputs passed
+   in explicitly) so it works the same whether called from a live render or from the voice-caddy
+   callback's ref-captured snapshot of state — and so it can be unit tested without a browser.
+   Returns null when there's nothing sensible to record right now (no course/hole GPS, "you"
+   isn't marked, "you" aren't in this hole's group, or the ball is already close enough to the
+   green that this is assumed to be short-game/putting rather than a full shot). */
+function computePendingShot({ hole, format, mePlayerId, selected, scores, bbState, team1Ids, team2Ids }) {
+  if (!mePlayerId || !hole || hole.teeLat == null) return null;
+  const NEAR_GREEN_YARDS = 30; // inside this range, assume chipping/putting — stop prompting for full shots
+
+  if (format === "stroke") {
+    if (!selected.includes(mePlayerId)) return null;
+    const cell = scores[mePlayerId]?.[hole.number] || {};
+    const isDrive = cell.driveLat == null;
+    let anchor;
+    if (isDrive) {
+      anchor = { lat: hole.teeLat, lon: hole.teeLon };
+    } else {
+      const extra = cell.extraShots || [];
+      anchor = extra.length ? { lat: extra[extra.length - 1].lat, lon: extra[extra.length - 1].lon } : { lat: cell.driveLat, lon: cell.driveLon };
+    }
+    const remaining = hole.greenLat != null && anchor ? haversineYards(anchor.lat, anchor.lon, hole.greenLat, hole.greenLon) : null;
+    if (!isDrive && remaining != null && remaining < NEAR_GREEN_YARDS) return null;
+    return { kind: "stroke", hole, anchor, isDrive };
+  }
+
+  // better ball — can only sensibly track whichever of the two teams "you" are on
+  let teamKey = null, who = null;
+  if ((team1Ids || []).includes(mePlayerId)) { teamKey = "team1"; who = team1Ids[0] === mePlayerId ? "A" : "B"; }
+  else if ((team2Ids || []).includes(mePlayerId)) { teamKey = "team2"; who = team2Ids[0] === mePlayerId ? "A" : "B"; }
+  if (!teamKey) return null;
+
+  const s = bbState[teamKey]?.[hole.number] || defaultBBHole();
+  const driveLatField = who === "A" ? "driveLatA" : "driveLatB";
+  const driveLonField = who === "A" ? "driveLonA" : "driveLonB";
+  const isDrive = s.rounds[0]?.[driveLatField] == null;
+  if (isDrive) return { kind: "bb", hole, teamKey, who, anchor: { lat: hole.teeLat, lon: hole.teeLon }, isDrive: true };
+
+  let roundIndex = null;
+  for (let i = s.rounds.length - 1; i >= 1; i--) {
+    if (s.rounds[i - 1].continueWith === who && s.rounds[i].lat == null) { roundIndex = i; break; }
+  }
+  if (roundIndex == null) return null; // not currently "your" ball, or nothing pending
+  const anchor = roundIndex === 1
+    ? (s.rounds[0][driveLatField] != null ? { lat: s.rounds[0][driveLatField], lon: s.rounds[0][driveLonField] } : { lat: hole.teeLat, lon: hole.teeLon })
+    : (s.rounds[roundIndex - 1].lat != null ? { lat: s.rounds[roundIndex - 1].lat, lon: s.rounds[roundIndex - 1].lon } : null);
+  if (!anchor) return null;
+  const remaining = hole.greenLat != null ? haversineYards(anchor.lat, anchor.lon, hole.greenLat, hole.greenLon) : null;
+  if (remaining != null && remaining < NEAR_GREEN_YARDS) return null;
+  return { kind: "bb", hole, teamKey, who, anchor, isDrive: false, roundIndex };
+}
 function bbHoleScore(state) {
   if (!state || !state.onGreen || !state.puttMode) return null;
   const pre = state.rounds.length;
@@ -1014,7 +1192,7 @@ function bbHoleScore(state) {
   return pre + Math.min(a, b);
 }
 
-function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, playerBName, playerAId, playerBId, state, onUpdate, onMarkDrive, livePos, distanceUnit, mePlayerId, meBag }) {
+function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, playerBName, playerAId, playerBId, state, onUpdate, onMarkDrive, onMarkShot, livePos, distanceUnit, mePlayerId, meBag }) {
   const s = state || defaultBBHole();
   const remainingYards = hole.greenLat != null && livePos ? haversineYards(livePos.lat, livePos.lon, hole.greenLat, hole.greenLon) : null;
   const suggestion = meBag?.length > 0 ? suggestClub(meBag, remainingYards) : null;
@@ -1095,6 +1273,29 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
                     </div>
                   </div>
                 )}
+                {i > 0 && (() => {
+                  const whoHit = s.rounds[i - 1].continueWith;
+                  const hitName = whoHit === "A" ? playerAName : whoHit === "B" ? playerBName : null;
+                  const hitId = whoHit === "A" ? playerAId : whoHit === "B" ? playerBId : null;
+                  if (!hitName) return null;
+                  return (
+                    <div style={{ marginBottom: 4, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                      <span style={{ color: C.turf }}>{hitName}:</span>
+                      {hole.teeLat != null && (
+                        <button style={{ ...btnGhost, fontSize: 10, padding: "3px 6px" }} onClick={() => onMarkShot && onMarkShot(whoHit, i)}>
+                          {r.shotYards != null ? `📍 ${Math.round(displayDistance(r.shotYards, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : "📍 Mark shot"}
+                        </button>
+                      )}
+                      <select style={{ ...inputStyle, width: 90, padding: "3px 4px", fontSize: 11 }} value={r.club || ""} onChange={(e) => patchRound(i, { club: e.target.value || null })}>
+                        <option value="">Club —</option>
+                        {CLUBS.map((c) => <option key={c} value={c}>{c}</option>)}
+                      </select>
+                      {hitId === mePlayerId && suggestion && !r.club && (
+                        <span style={{ fontSize: 10, color: C.fairway, fontWeight: 700 }}>🎒 {suggestion}?</span>
+                      )}
+                    </div>
+                  );
+                })()}
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                   {["A", "B"].map((who) => (
                     <button key={who}
@@ -1146,17 +1347,20 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
 
 /* ================= PLAY TAB ================= */
 function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit, mePlayerId }) {
-  const [step, setStep] = useState("setup");
-  const [format, setFormat] = useState("stroke");
-  const [courseId, setCourseId] = useState(courses[0]?.id || "");
-  const [selected, setSelected] = useState([]);
-  const [overrides, setOverrides] = useState({});
-  const [scores, setScores] = useState({});
-  const [teamAssign, setTeamAssign] = useState({});
-  const [bbState, setBbState] = useState({ team1: {}, team2: {} });
+  /* resume an in-progress round after an accidental tab/app close — read once at mount */
+  const [savedRound] = useState(() => loadKey(ACTIVE_ROUND_KEY, null));
+  const [step, setStep] = useState(savedRound ? "scoring" : "setup");
+  const [format, setFormat] = useState(savedRound?.format || "stroke");
+  const [courseId, setCourseId] = useState(savedRound?.courseId || courses[0]?.id || "");
+  const [selected, setSelected] = useState(savedRound?.selected || []);
+  const [overrides, setOverrides] = useState(savedRound?.overrides || {});
+  const [scores, setScores] = useState(savedRound?.scores || {});
+  const [teamAssign, setTeamAssign] = useState(savedRound?.teamAssign || {});
+  const [bbState, setBbState] = useState(savedRound?.bbState || { team1: {}, team2: {} });
   const [driveModal, setDriveModal] = useState(null);
   const [voiceOn, setVoiceOn] = useState(false);
   const [voiceMsg, setVoiceMsg] = useState("");
+  const [resumedNotice, setResumedNotice] = useState(!!savedRound);
 
   const course = courses.find((c) => c.id === courseId);
   const livePos = useLivePosition(step === "scoring");
@@ -1165,6 +1369,21 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
   useEffect(() => {
     if (!courseId && courses.length) setCourseId(courses[0].id);
   }, [courses]);
+
+  /* if the resumed round's course was deleted since, there's nothing sensible to score against */
+  useEffect(() => {
+    if (step === "scoring" && !course && courses.length) {
+      setStep("setup");
+      saveKey(ACTIVE_ROUND_KEY, null);
+    }
+  }, [step, course, courses]);
+
+  /* persist the in-progress round on every change, so closing the tab/app mid-round doesn't
+     lose it — only while actively scoring; the setup screen and finished rounds don't persist */
+  useEffect(() => {
+    if (step !== "scoring") return;
+    saveKey(ACTIVE_ROUND_KEY, { format, courseId, selected, overrides, scores, teamAssign, bbState });
+  }, [step, format, courseId, selected, overrides, scores, teamAssign, bbState]);
 
   function togglePlayer(id) {
     if (selected.includes(id)) {
@@ -1213,40 +1432,212 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
     });
   }
 
+  /* --- shot recording: always reads/writes via the functional setState form so these stay
+     correct even when called from the voice-caddy callback below, whose own closure is only
+     ever created once (see the refs a little further down) --- */
+  function recordStrokeDrive(pid, hole, pos) {
+    let result = null;
+    setScores((prev) => {
+      const cell = prev[pid]?.[hole.number] || {};
+      const anchor = hole.teeLat != null ? { lat: hole.teeLat, lon: hole.teeLon } : null;
+      const yards = anchor ? haversineYards(anchor.lat, anchor.lon, pos.lat, pos.lon) : null;
+      const remaining = hole.greenLat != null ? haversineYards(pos.lat, pos.lon, hole.greenLat, hole.greenLon) : null;
+      result = { label: "Drive", yards, remaining };
+      const nextCell = { ...cell, driveYards: yards != null ? Math.round(yards) : null, driveLat: pos.lat, driveLon: pos.lon };
+      return { ...prev, [pid]: { ...prev[pid], [hole.number]: nextCell } };
+    });
+    return result;
+  }
+  function recordStrokeNextShot(pid, hole, pos) {
+    let result = null;
+    setScores((prev) => {
+      const cell = prev[pid]?.[hole.number] || {};
+      const extra = cell.extraShots || [];
+      const prevPt = extra.length
+        ? { lat: extra[extra.length - 1].lat, lon: extra[extra.length - 1].lon }
+        : cell.driveLat != null
+        ? { lat: cell.driveLat, lon: cell.driveLon }
+        : hole.teeLat != null
+        ? { lat: hole.teeLat, lon: hole.teeLon }
+        : null;
+      const yards = prevPt ? haversineYards(prevPt.lat, prevPt.lon, pos.lat, pos.lon) : null;
+      const remaining = hole.greenLat != null ? haversineYards(pos.lat, pos.lon, hole.greenLat, hole.greenLon) : null;
+      result = { label: `Shot ${extra.length + 2}`, yards, remaining };
+      const nextExtra = [...extra, { yards: yards != null ? Math.round(yards) : null, lat: pos.lat, lon: pos.lon, club: null }];
+      return { ...prev, [pid]: { ...prev[pid], [hole.number]: { ...cell, extraShots: nextExtra } } };
+    });
+    return result;
+  }
+  function recordBBDrive(teamKey, who, hole, pos) {
+    let result = null;
+    setBbState((prev) => {
+      const s = prev[teamKey]?.[hole.number] || defaultBBHole();
+      const rounds = [...s.rounds];
+      const driveLatField = who === "A" ? "driveLatA" : "driveLatB";
+      const driveLonField = who === "A" ? "driveLonA" : "driveLonB";
+      const driveYardsField = who === "A" ? "driveYardsA" : "driveYardsB";
+      const anchor = hole.teeLat != null ? { lat: hole.teeLat, lon: hole.teeLon } : null;
+      const yards = anchor ? haversineYards(anchor.lat, anchor.lon, pos.lat, pos.lon) : null;
+      const remaining = hole.greenLat != null ? haversineYards(pos.lat, pos.lon, hole.greenLat, hole.greenLon) : null;
+      result = { label: "Drive", yards, remaining };
+      rounds[0] = { ...rounds[0], [driveYardsField]: yards != null ? Math.round(yards) : null, [driveLatField]: pos.lat, [driveLonField]: pos.lon };
+      return { ...prev, [teamKey]: { ...prev[teamKey], [hole.number]: { ...s, rounds } } };
+    });
+    return result;
+  }
+  /* marks the shot at an explicit round index — used both by the manual per-round "Mark shot"
+     button (which already knows exactly which round it's for) and, via computePendingShot's
+     roundIndex, by the auto-detect/voice paths */
+  function recordBBShotAtRound(teamKey, who, hole, roundIndex, pos) {
+    let result = null;
+    setBbState((prev) => {
+      const s = prev[teamKey]?.[hole.number] || defaultBBHole();
+      const rounds = [...s.rounds];
+      if (!rounds[roundIndex]) return prev;
+      const driveLatField = who === "A" ? "driveLatA" : "driveLatB";
+      const driveLonField = who === "A" ? "driveLonA" : "driveLonB";
+      const anchor = roundIndex === 1
+        ? rounds[0][driveLatField] != null
+          ? { lat: rounds[0][driveLatField], lon: rounds[0][driveLonField] }
+          : hole.teeLat != null ? { lat: hole.teeLat, lon: hole.teeLon } : null
+        : rounds[roundIndex - 1]?.lat != null
+        ? { lat: rounds[roundIndex - 1].lat, lon: rounds[roundIndex - 1].lon }
+        : null;
+      const yards = anchor ? haversineYards(anchor.lat, anchor.lon, pos.lat, pos.lon) : null;
+      const remaining = hole.greenLat != null ? haversineYards(pos.lat, pos.lon, hole.greenLat, hole.greenLon) : null;
+      result = { label: `Shot ${roundIndex + 1}`, yards, remaining };
+      rounds[roundIndex] = { ...rounds[roundIndex], shotYards: yards != null ? Math.round(yards) : null, lat: pos.lat, lon: pos.lon };
+      return { ...prev, [teamKey]: { ...prev[teamKey], [hole.number]: { ...s, rounds } } };
+    });
+    return result;
+  }
+
+  /* shows the club suggestion + distance for a just-recorded shot next to the voice caddy
+     button, and — for the voice/auto-detect paths, or when voice caddy is on — reads it aloud */
+  function announceShotResult(result, { speakAloud } = {}) {
+    if (!result) return;
+    const suggestion = mePlayer?.bag?.length ? suggestClub(mePlayer.bag, result.remaining) : null;
+    const yardsTxt = result.yards != null ? `${Math.round(displayDistance(result.yards, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : null;
+    const remainTxt = result.remaining != null ? `${Math.round(displayDistance(result.remaining, distanceUnit))}${distanceUnit === "m" ? "m" : "y"} to the green` : null;
+    const parts = [`${result.label} marked${yardsTxt ? ` (${yardsTxt})` : ""}`];
+    if (remainTxt) parts.push(remainTxt);
+    if (suggestion) parts.push(`suggested next club: ${suggestion}`);
+    setVoiceMsg(parts.join(" · "));
+    if (speakAloud) {
+      const spoken = [`${result.label} recorded.`];
+      if (remainTxt) spoken.push(`${remainTxt}.`);
+      if (suggestion) spoken.push(`Suggested club: ${suggestion}.`);
+      speak(spoken.join(" "));
+    }
+  }
+
   /* refs so the voice-caddy callback (bound once when listening starts) always sees fresh values */
   const mePlayerIdRef = useRef(mePlayerId);
   const livePosRef = useRef(livePos);
   const courseRef = useRef(course);
   const formatRef = useRef(format);
+  const selectedRef = useRef(selected);
+  const scoresRef = useRef(scores);
+  const bbStateRef = useRef(bbState);
   const team1IdsRef = useRef(team1Ids);
   const team2IdsRef = useRef(team2Ids);
   useEffect(() => { mePlayerIdRef.current = mePlayerId; }, [mePlayerId]);
   useEffect(() => { livePosRef.current = livePos; }, [livePos]);
   useEffect(() => { courseRef.current = course; }, [course]);
   useEffect(() => { formatRef.current = format; }, [format]);
+  useEffect(() => { selectedRef.current = selected; }, [selected]);
+  useEffect(() => { scoresRef.current = scores; }, [scores]);
+  useEffect(() => { bbStateRef.current = bbState; }, [bbState]);
   useEffect(() => { team1IdsRef.current = team1Ids; });
   useEffect(() => { team2IdsRef.current = team2Ids; });
 
-  const handleClubHeard = useCallback((club) => {
+  const handleVoiceCommand = useCallback((kind, payload, transcript) => {
     const me = mePlayerIdRef.current;
     if (!me) { setVoiceMsg("Mark a player as ⭐ you in the Players tab first."); speak("Mark a player as you first."); return; }
     const crs = courseRef.current;
     const hole = crs ? nearestHoleByPosition(crs.holes, livePosRef.current) : null;
-    if (!hole) { setVoiceMsg(`Heard "${club}" but can't tell which hole you're on yet — enable location.`); speak("Can't tell which hole you're on yet."); return; }
-    if (formatRef.current === "stroke") {
-      setScoreField(me, hole.number, "club", club);
-    } else {
-      const t1 = team1IdsRef.current, t2 = team2IdsRef.current;
-      let teamKey = null, who = null;
-      if (t1.includes(me)) { teamKey = "team1"; who = t1[0] === me ? "A" : "B"; }
-      else if (t2.includes(me)) { teamKey = "team2"; who = t2[0] === me ? "A" : "B"; }
-      if (teamKey) patchBBClub(teamKey, hole.number, who, club);
+    if (!hole) { setVoiceMsg(`Heard "${transcript}" but can't tell which hole you're on yet — enable location.`); speak("Can't tell which hole you're on yet."); return; }
+
+    if (kind === "unmatched") {
+      // deliberately no spoken reply here — a wake word alone shouldn't interrupt mid-swing;
+      // the visible transcript is what lets a mis-heard phrase be diagnosed instead of looking
+      // like the mic just isn't picking anything up at all
+      setVoiceMsg(`Heard: "${transcript}" — didn't catch a club name or "record shot". Try "I'm using a 6 iron" or "record shot".`);
+      return;
     }
-    setVoiceMsg(`Logged ${club} for hole ${hole.number}.`);
-    speak(`Logged ${club} for hole ${hole.number}`);
+    if (kind === "club") {
+      if (formatRef.current === "stroke") {
+        setScoreField(me, hole.number, "club", payload);
+      } else {
+        const t1 = team1IdsRef.current, t2 = team2IdsRef.current;
+        let teamKey = null, who = null;
+        if (t1.includes(me)) { teamKey = "team1"; who = t1[0] === me ? "A" : "B"; }
+        else if (t2.includes(me)) { teamKey = "team2"; who = t2[0] === me ? "A" : "B"; }
+        if (teamKey) patchBBClub(teamKey, hole.number, who, payload);
+      }
+      setVoiceMsg(`Logged ${payload} for hole ${hole.number}.`);
+      speak(`Logged ${payload} for hole ${hole.number}`);
+      return;
+    }
+    if (kind === "recordShot") {
+      const pos = livePosRef.current;
+      if (!pos) { setVoiceMsg('Heard "record shot" but don\'t have your GPS position yet.'); speak("Don't have your location yet."); return; }
+      const pending = computePendingShot({
+        hole, format: formatRef.current, mePlayerId: me, selected: selectedRef.current,
+        scores: scoresRef.current, bbState: bbStateRef.current,
+        team1Ids: team1IdsRef.current, team2Ids: team2IdsRef.current,
+      });
+      if (!pending) { setVoiceMsg('Heard "record shot" but there\'s nothing pending to mark for you right now.'); speak("Nothing to record right now."); return; }
+      const posArg = { lat: pos.lat, lon: pos.lon };
+      let result;
+      if (pending.kind === "stroke") {
+        result = pending.isDrive ? recordStrokeDrive(me, hole, posArg) : recordStrokeNextShot(me, hole, posArg);
+      } else {
+        result = pending.isDrive
+          ? recordBBDrive(pending.teamKey, pending.who, hole, posArg)
+          : recordBBShotAtRound(pending.teamKey, pending.who, hole, pending.roundIndex, posArg);
+      }
+      announceShotResult(result, { speakAloud: true });
+    }
   }, []);
 
-  useVoiceCaddy(voiceOn && step === "scoring", handleClubHeard);
+  useVoiceCaddy(voiceOn && step === "scoring", handleVoiceCommand);
+
+  /* auto shot-stop detection — scoped to "you" only, see computePendingShot/shotDetectorStep */
+  const currentHoleForMe = course && livePos ? nearestHoleByPosition(course.holes, livePos) : null;
+  const myPending = step === "scoring"
+    ? computePendingShot({ hole: currentHoleForMe, format, mePlayerId, selected, scores, bbState, team1Ids, team2Ids })
+    : null;
+  const shotDetector = useShotStopDetector(step === "scoring" && !!myPending, livePos, myPending?.anchor || null);
+
+  function openAutoShotModal(pending, pos) {
+    const label = mePlayer?.name || "You";
+    setDriveModal({
+      hole: pending.hole,
+      label,
+      shotLabel: pending.isDrive ? "drive" : "next shot",
+      fromLat: pending.anchor?.lat,
+      fromLon: pending.anchor?.lon,
+      initialPos: { lat: pos.lat, lng: pos.lon },
+      onSave: (yd, lat, lng) => {
+        const posArg = { lat, lon: lng };
+        const result = pending.kind === "stroke"
+          ? pending.isDrive ? recordStrokeDrive(mePlayerId, pending.hole, posArg) : recordStrokeNextShot(mePlayerId, pending.hole, posArg)
+          : pending.isDrive
+          ? recordBBDrive(pending.teamKey, pending.who, pending.hole, posArg)
+          : recordBBShotAtRound(pending.teamKey, pending.who, pending.hole, pending.roundIndex, posArg);
+        announceShotResult(result, { speakAloud: voiceOn });
+        setDriveModal(null);
+        shotDetector.reset();
+      },
+    });
+  }
+
+  function abandonRound() {
+    setStep("setup");
+    saveKey(ACTIVE_ROUND_KEY, null);
+    setResumedNotice(false);
+  }
 
   function playerHandicapIndex(pid) {
     if (overrides[pid] != null && overrides[pid] !== "") return Number(overrides[pid]);
@@ -1333,6 +1724,8 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
 
   function resetAll() {
     setStep("setup"); setSelected([]); setOverrides({}); setScores({}); setTeamAssign({}); setBbState({ team1: {}, team2: {} });
+    saveKey(ACTIVE_ROUND_KEY, null);
+    setResumedNotice(false);
   }
 
   if (courses.length === 0) return <div style={emptyStyle}>Add a course in the Courses tab before starting a round.</div>;
@@ -1419,9 +1812,15 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
           <div style={{ fontFamily: serif, fontSize: 19, color: C.fairway }}>{course.name}</div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <VoiceCaddyButton voiceOn={voiceOn} setVoiceOn={setVoiceOn} voiceMsg={voiceMsg} mePlayer={mePlayer} />
-            <button style={{ ...btnGhost, fontSize: 12 }} onClick={() => setStep("setup")}>← Back to setup</button>
+            <button style={{ ...btnGhost, fontSize: 12 }} onClick={abandonRound}>← Back to setup</button>
           </div>
         </div>
+        {resumedNotice && (
+          <div style={{ background: C.paper2, border: `1px solid ${C.brass}`, borderRadius: 6, padding: "8px 12px", fontFamily: sans, fontSize: 12, color: C.fairway, marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span>Resumed your in-progress round.</span>
+            <button onClick={() => setResumedNotice(false)} style={{ background: "transparent", border: "none", color: C.fairway, cursor: "pointer", fontSize: 14 }}>×</button>
+          </div>
+        )}
         <div style={{ overflowX: "auto", border: `1px solid ${C.line}`, borderRadius: 8 }}>
           <table style={{ borderCollapse: "collapse", width: "100%", fontFamily: mono, fontSize: 13 }}>
             <thead>
@@ -1480,7 +1879,12 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
                             onClick={() => setDriveModal({
                               hole: h,
                               label: players.find((p) => p.id === pid)?.name || "Player",
-                              onSave: (yd) => { setScoreField(pid, h.number, "driveYards", yd); setDriveModal(null); },
+                              shotLabel: "drive",
+                              onSave: (yd, lat, lng) => {
+                                const result = recordStrokeDrive(pid, h, { lat, lon: lng });
+                                if (pid === mePlayerId) announceShotResult(result, { speakAloud: false });
+                                setDriveModal(null);
+                              },
                             })}
                           >
                             {cell.driveYards ? `📍 ${Math.round(displayDistance(cell.driveYards, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : "📍 Mark drive"}
@@ -1494,6 +1898,47 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
                           <option value="">Club —</option>
                           {CLUBS.map((c) => <option key={c} value={c}>{c}</option>)}
                         </select>
+                        {h.teeLat != null && (
+                          <div style={{ marginTop: 4 }}>
+                            {(cell.extraShots || []).map((es, i) => (
+                              <div key={i} style={{ fontSize: 10, color: C.turf, fontFamily: sans, marginTop: 2, display: "flex", alignItems: "center", gap: 4 }}>
+                                <span>Shot {i + 2}: {es.yards != null ? `${Math.round(displayDistance(es.yards, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : "—"}</span>
+                                <select
+                                  style={{ ...inputStyle, width: 72, padding: "2px 3px", fontSize: 10 }}
+                                  value={es.club || ""}
+                                  onChange={(e) => {
+                                    const next = [...(cell.extraShots || [])];
+                                    next[i] = { ...next[i], club: e.target.value || null };
+                                    setScoreField(pid, h.number, "extraShots", next);
+                                  }}
+                                >
+                                  <option value="">Club —</option>
+                                  {CLUBS.map((c) => <option key={c} value={c}>{c}</option>)}
+                                </select>
+                              </div>
+                            ))}
+                            <button
+                              style={{ ...btnGhost, fontSize: 10, padding: "3px 6px", marginTop: 4 }}
+                              onClick={() => {
+                                const extra = cell.extraShots || [];
+                                const prevPt = extra.length ? extra[extra.length - 1] : cell.driveLat != null ? { lat: cell.driveLat, lon: cell.driveLon } : null;
+                                setDriveModal({
+                                  hole: h,
+                                  label: players.find((p) => p.id === pid)?.name || "Player",
+                                  shotLabel: "next shot",
+                                  fromLat: prevPt?.lat, fromLon: prevPt?.lon,
+                                  onSave: (yd, lat, lng) => {
+                                    const result = recordStrokeNextShot(pid, h, { lat, lon: lng });
+                                    if (pid === mePlayerId) announceShotResult(result, { speakAloud: false });
+                                    setDriveModal(null);
+                                  },
+                                });
+                              }}
+                            >
+                              + Mark next shot
+                            </button>
+                          </div>
+                        )}
                       </td>
                     );
                   })}
@@ -1516,9 +1961,20 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
           <DriveMapModal
             hole={driveModal.hole}
             label={driveModal.label}
+            shotLabel={driveModal.shotLabel}
+            fromLat={driveModal.fromLat}
+            fromLon={driveModal.fromLon}
+            initialPos={driveModal.initialPos}
             distanceUnit={distanceUnit}
             onCancel={() => setDriveModal(null)}
             onSave={driveModal.onSave}
+          />
+        )}
+        {shotDetector.fired && myPending && !driveModal && (
+          <ShotStopPrompt
+            hole={myPending.hole}
+            onDismiss={() => shotDetector.reset()}
+            onMark={() => { if (shotDetector.stoppedAt) openAutoShotModal(myPending, shotDetector.stoppedAt); }}
           />
         )}
       </div>
@@ -1534,14 +1990,38 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
     setBbState((prev) => ({ ...prev, [teamKey]: { ...prev[teamKey], [holeNumber]: nextState } }));
   }
   function markDriveForBB(teamKey, h, who, currentState, playerName) {
-    const s = currentState || defaultBBHole();
     setDriveModal({
       hole: h,
       label: playerName || "Player",
-      onSave: (yd) => {
-        const rounds = [...s.rounds];
-        rounds[0] = { ...rounds[0], [who === "A" ? "driveYardsA" : "driveYardsB"]: yd };
-        updateBB(teamKey, h.number, { ...s, rounds });
+      shotLabel: "drive",
+      onSave: (yd, lat, lng) => {
+        const result = recordBBDrive(teamKey, who, h, { lat, lon: lng });
+        const pid = who === "A" ? (teamKey === "team1" ? team1Ids[0] : team2Ids[0]) : (teamKey === "team1" ? team1Ids[1] : team2Ids[1]);
+        if (pid === mePlayerId) announceShotResult(result, { speakAloud: false });
+        setDriveModal(null);
+      },
+    });
+  }
+  function markNextShotForBB(teamKey, h, who, roundIndex, playerName) {
+    const s = bbState[teamKey]?.[h.number] || defaultBBHole();
+    const driveLatField = who === "A" ? "driveLatA" : "driveLatB";
+    const driveLonField = who === "A" ? "driveLonA" : "driveLonB";
+    const anchor = roundIndex === 1
+      ? s.rounds[0]?.[driveLatField] != null
+        ? { lat: s.rounds[0][driveLatField], lon: s.rounds[0][driveLonField] }
+        : h.teeLat != null ? { lat: h.teeLat, lon: h.teeLon } : null
+      : s.rounds[roundIndex - 1]?.lat != null
+      ? { lat: s.rounds[roundIndex - 1].lat, lon: s.rounds[roundIndex - 1].lon }
+      : null;
+    setDriveModal({
+      hole: h,
+      label: playerName || "Player",
+      shotLabel: `shot ${roundIndex + 1}`,
+      fromLat: anchor?.lat, fromLon: anchor?.lon,
+      onSave: (yd, lat, lng) => {
+        const result = recordBBShotAtRound(teamKey, who, h, roundIndex, { lat, lon: lng });
+        const pid = who === "A" ? (teamKey === "team1" ? team1Ids[0] : team2Ids[0]) : (teamKey === "team1" ? team1Ids[1] : team2Ids[1]);
+        if (pid === mePlayerId) announceShotResult(result, { speakAloud: false });
         setDriveModal(null);
       },
     });
@@ -1555,9 +2035,15 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
         <div style={{ fontFamily: serif, fontSize: 19, color: C.fairway }}>{course.name} — Better Ball</div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <VoiceCaddyButton voiceOn={voiceOn} setVoiceOn={setVoiceOn} voiceMsg={voiceMsg} mePlayer={mePlayer} />
-          <button style={{ ...btnGhost, fontSize: 12 }} onClick={() => setStep("setup")}>← Back to setup</button>
+          <button style={{ ...btnGhost, fontSize: 12 }} onClick={abandonRound}>← Back to setup</button>
         </div>
       </div>
+      {resumedNotice && (
+        <div style={{ background: C.paper2, border: `1px solid ${C.brass}`, borderRadius: 6, padding: "8px 12px", fontFamily: sans, fontSize: 12, color: C.fairway, marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>Resumed your in-progress round.</span>
+          <button onClick={() => setResumedNotice(false)} style={{ background: "transparent", border: "none", color: C.fairway, cursor: "pointer", fontSize: 14 }}>×</button>
+        </div>
+      )}
       <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, marginBottom: 14 }}>
         {solo ? (
           <>Score ({pA1?.name} & {pB1?.name}): <b style={{ color: C.team1 }}>{t1Total}</b></>
@@ -1580,12 +2066,14 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
                 playerAId={team1Ids[0]} playerBId={team1Ids[1]}
                 state={bbState.team1?.[h.number]} onUpdate={(s) => updateBB("team1", h.number, s)}
                 onMarkDrive={(who) => markDriveForBB("team1", h, who, bbState.team1?.[h.number], who === "A" ? pA1?.name : pB1?.name)}
+                onMarkShot={(who, roundIdx) => markNextShotForBB("team1", h, who, roundIdx, who === "A" ? pA1?.name : pB1?.name)}
                 livePos={livePos} distanceUnit={distanceUnit} mePlayerId={mePlayerId} meBag={mePlayer?.bag} />
               {!solo && (
                 <BetterBallHoleCard hole={h} teamKey="team2" teamColor={C.team2} teamLabel="Team 2" playerAName={pA2?.name || "A"} playerBName={pB2?.name || "B"}
                   playerAId={team2Ids[0]} playerBId={team2Ids[1]}
                   state={bbState.team2?.[h.number]} onUpdate={(s) => updateBB("team2", h.number, s)}
                   onMarkDrive={(who) => markDriveForBB("team2", h, who, bbState.team2?.[h.number], who === "A" ? pA2?.name : pB2?.name)}
+                  onMarkShot={(who, roundIdx) => markNextShotForBB("team2", h, who, roundIdx, who === "A" ? pA2?.name : pB2?.name)}
                   livePos={livePos} distanceUnit={distanceUnit} mePlayerId={mePlayerId} meBag={mePlayer?.bag} />
               )}
             </div>
@@ -1599,9 +2087,20 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
         <DriveMapModal
           hole={driveModal.hole}
           label={driveModal.label}
+          shotLabel={driveModal.shotLabel}
+          fromLat={driveModal.fromLat}
+          fromLon={driveModal.fromLon}
+          initialPos={driveModal.initialPos}
           distanceUnit={distanceUnit}
           onCancel={() => setDriveModal(null)}
           onSave={driveModal.onSave}
+        />
+      )}
+      {shotDetector.fired && myPending && !driveModal && (
+        <ShotStopPrompt
+          hole={myPending.hole}
+          onDismiss={() => shotDetector.reset()}
+          onMark={() => { if (shotDetector.stoppedAt) openAutoShotModal(myPending, shotDetector.stoppedAt); }}
         />
       )}
     </div>
@@ -1639,11 +2138,12 @@ function RoundDetailStroke({ round, players, courseHoles, distanceUnit }) {
             <div style={{ fontFamily: serif, fontSize: 15, color: C.fairway, marginBottom: 8 }}>{player?.name || "?"}</div>
             <div style={{ overflowX: "auto" }}>
               <table style={{ borderCollapse: "collapse", fontFamily: mono, fontSize: 12, width: "100%" }}>
-                <thead><tr><th style={thStyle}>Hole</th><th style={thStyle}>Par</th><th style={thStyle}>Score</th><th style={thStyle}>Putts</th><th style={thStyle}>Drive</th><th style={thStyle}>Club</th></tr></thead>
+                <thead><tr><th style={thStyle}>Hole</th><th style={thStyle}>Par</th><th style={thStyle}>Score</th><th style={thStyle}>Putts</th><th style={thStyle}>Drive</th><th style={thStyle}>Club</th><th style={thStyle}>Other shots</th></tr></thead>
                 <tbody>
                   {Object.keys(s?.holes || {}).map((hn) => {
                     const cell = s.holes[hn];
                     const hPar = courseHoles.find((h) => String(h.number) === String(hn))?.par;
+                    const extraShots = cell.extraShots || [];
                     return (
                       <tr key={hn}>
                         <td style={tdStyle}>{hn}</td>
@@ -1652,6 +2152,13 @@ function RoundDetailStroke({ round, players, courseHoles, distanceUnit }) {
                         <td style={tdStyle}>{cell.putts || "—"}</td>
                         <td style={tdStyle}>{cell.driveYards ? `${Math.round(displayDistance(cell.driveYards, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : "—"}</td>
                         <td style={tdStyle}>{cell.club || "—"}</td>
+                        <td style={tdStyle}>
+                          {extraShots.length === 0 ? "—" : extraShots.map((es, i) => (
+                            <div key={i} style={{ whiteSpace: "nowrap" }}>
+                              S{i + 2}: {es.yards != null ? `${Math.round(displayDistance(es.yards, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : "—"}{es.club ? ` (${es.club})` : ""}
+                            </div>
+                          ))}
+                        </td>
                       </tr>
                     );
                   })}
@@ -1710,9 +2217,15 @@ function RoundDetailBetterBall({ round, players, distanceUnit }) {
                         <td style={tdStyle}>
                           {detail?.rounds?.map((rnd, ri) => {
                             const who = rnd.continueWith === "A" ? (pA?.name || "A") : rnd.continueWith === "B" ? (pB?.name || "B") : "—";
-                            const shape = ri === 0 ? (rnd.continueWith === "A" ? rnd.shapeA : rnd.continueWith === "B" ? rnd.shapeB : null) : null;
-                            const driveYd = ri === 0 ? (rnd.continueWith === "A" ? rnd.driveYardsA : rnd.continueWith === "B" ? rnd.driveYardsB : null) : null;
-                            const club = ri === 0 ? (rnd.continueWith === "A" ? rnd.clubA : rnd.continueWith === "B" ? rnd.clubB : null) : null;
+                            let shape = null, driveYd = null, club = null;
+                            if (ri === 0) {
+                              shape = rnd.continueWith === "A" ? rnd.shapeA : rnd.continueWith === "B" ? rnd.shapeB : null;
+                              driveYd = rnd.continueWith === "A" ? rnd.driveYardsA : rnd.continueWith === "B" ? rnd.driveYardsB : null;
+                              club = rnd.continueWith === "A" ? rnd.clubA : rnd.continueWith === "B" ? rnd.clubB : null;
+                            } else {
+                              driveYd = rnd.shotYards ?? null;
+                              club = rnd.club ?? null;
+                            }
                             const extra = [club, driveYd ? `${Math.round(displayDistance(driveYd, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : null].filter(Boolean).join(", ");
                             const label = extra ? `${who} (${extra})` : who;
                             return <ShotChip key={ri} label={label} colorKey={shape} />;
