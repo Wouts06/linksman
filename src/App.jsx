@@ -519,6 +519,15 @@ function parTotal(course) {
   return course.holes.reduce((s, h) => s + (Number(h.par) || 0), 0);
 }
 
+/* orders a course's holes starting from the chosen tee (1st or 10th), wrapping around —
+   used by the per-hole stroke-play scoring view so "starting hole" just rotates play order */
+function playOrderHoles(holes, startNumber) {
+  const sorted = (holes || []).slice().sort((a, b) => a.number - b.number);
+  const startIdx = sorted.findIndex((h) => h.number === startNumber);
+  if (startIdx <= 0) return sorted;
+  return [...sorted.slice(startIdx), ...sorted.slice(0, startIdx)];
+}
+
 /* distances are always stored in yards; convert only for display/entry */
 const ydToM = (yd) => (yd == null || yd === "" ? "" : Math.round(Number(yd) * 0.9144));
 const mToYd = (m) => (m == null || m === "" ? "" : Math.round(Number(m) / 0.9144));
@@ -1575,6 +1584,117 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
   );
 }
 
+/* single "focused" hole in the per-hole stroke-play scoring view — occupies most of the
+   screen while active; one compact card per selected player inside it. Direction/putts and
+   shot-marking sit side by side as equal-width flex columns so neither overflows the card. */
+function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit, livePos, mePlayer, onScoreField, onMarkDrive, onMarkNextShot, onNext }) {
+  const liveYards = hole.greenLat != null && livePos ? haversineYards(livePos.lat, livePos.lon, hole.greenLat, hole.greenLon) : null;
+  const suggestion = liveYards != null && mePlayer?.bag?.length ? suggestClub(mePlayer.bag, liveYards) : null;
+  const unitLabel = distanceUnit === "m" ? "m" : "y";
+
+  return (
+    <div style={{ padding: 12, background: C.white }}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 10, gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 12, minWidth: 0 }}>
+          <div style={{ fontFamily: serif, fontSize: 36, color: C.fairway, lineHeight: 1 }}>{hole.number}</div>
+          <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, lineHeight: 1.5 }}>
+            <div>Par <b style={{ color: C.ink, fontSize: 14 }}>{hole.par}</b></div>
+            {hole.strokeIndex ? <div>SI <b style={{ color: C.ink, fontSize: 14 }}>{hole.strokeIndex}</b></div> : null}
+          </div>
+        </div>
+        <div style={{ textAlign: "right", fontFamily: sans, fontSize: 12, color: C.turf, flexShrink: 0 }}>
+          {hole.yardage ? <div>{displayDistance(hole.yardage, distanceUnit)}{unitLabel}</div> : null}
+          {liveYards != null && (
+            <div style={{ color: C.fairway, fontWeight: 700 }}>📍 {Math.round(displayDistance(liveYards, distanceUnit))}{unitLabel}</div>
+          )}
+          {suggestion && <div style={{ color: C.fairway }}>🎒 {CLUB_ABBREV[suggestion] || suggestion}</div>}
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gap: 8 }}>
+        {selected.map((pid) => {
+          const cell = scores[pid]?.[hole.number] || {};
+          const player = players.find((p) => p.id === pid);
+          const extraShots = cell.extraShots || [];
+          return (
+            <div key={pid} style={{ border: `1px solid ${C.line}`, borderRadius: 6, padding: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6, gap: 8 }}>
+                <div style={{ fontFamily: sans, fontSize: 13, fontWeight: 700, color: C.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{player?.name}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                  <input
+                    type="number"
+                    style={{ width: 44, padding: "5px 6px", fontFamily: mono, fontSize: 16, border: `1px solid ${C.line}`, borderRadius: 5, boxSizing: "border-box" }}
+                    value={cell.gross ?? ""}
+                    onChange={(e) => onScoreField(pid, hole.number, "gross", e.target.value)}
+                  />
+                  <ScoreBadge gross={cell.gross} par={hole.par} />
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.03em", color: C.turf, fontFamily: sans, marginBottom: 3 }}>Direction</div>
+                  <ShapeSelector par={hole.par} value={cell.shape} onChange={(v) => onScoreField(pid, hole.number, "shape", v)} />
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
+                    <span style={{ fontSize: 11, color: C.turf, fontFamily: sans }}>Putts</span>
+                    <input
+                      type="number"
+                      style={{ width: 38, padding: "4px 5px", fontFamily: mono, fontSize: 13, border: `1px solid ${C.line}`, borderRadius: 4, boxSizing: "border-box" }}
+                      value={cell.putts ?? ""}
+                      onChange={(e) => onScoreField(pid, hole.number, "putts", e.target.value)}
+                    />
+                  </div>
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.03em", color: C.turf, fontFamily: sans, marginBottom: 3 }}>Shots</div>
+                  {hole.teeLat != null && (
+                    <button style={{ ...btnGhost, fontSize: 10, padding: "4px 6px", width: "100%", boxSizing: "border-box" }} onClick={() => onMarkDrive(pid)}>
+                      {cell.driveYards ? `📍 ${Math.round(displayDistance(cell.driveYards, distanceUnit))}${unitLabel}` : "📍 Mark drive"}
+                    </button>
+                  )}
+                  <select
+                    style={{ ...inputStyle, width: "100%", boxSizing: "border-box", padding: "3px 4px", fontSize: 11, marginTop: 4 }}
+                    value={cell.club || ""}
+                    onChange={(e) => onScoreField(pid, hole.number, "club", e.target.value || null)}
+                  >
+                    <option value="">Club —</option>
+                    {CLUBS.map((c) => <option key={c} value={c}>{CLUB_ABBREV[c] || c}</option>)}
+                  </select>
+                  {hole.teeLat != null && extraShots.map((es, i) => (
+                    <div key={i} style={{ fontSize: 10, color: C.turf, fontFamily: sans, marginTop: 4, display: "flex", alignItems: "center", gap: 4 }}>
+                      <span style={{ flexShrink: 0 }}>S{i + 2}: {es.yards != null ? `${Math.round(displayDistance(es.yards, distanceUnit))}${unitLabel}` : "—"}</span>
+                      <select
+                        style={{ ...inputStyle, flex: 1, minWidth: 0, padding: "2px 3px", fontSize: 10 }}
+                        value={es.club || ""}
+                        onChange={(e) => {
+                          const next = [...extraShots];
+                          next[i] = { ...next[i], club: e.target.value || null };
+                          onScoreField(pid, hole.number, "extraShots", next);
+                        }}
+                      >
+                        <option value="">—</option>
+                        {CLUBS.map((c) => <option key={c} value={c}>{CLUB_ABBREV[c] || c}</option>)}
+                      </select>
+                    </div>
+                  ))}
+                  {hole.teeLat != null && (
+                    <button style={{ ...btnGhost, fontSize: 10, padding: "4px 6px", marginTop: 4, width: "100%", boxSizing: "border-box" }} onClick={() => onMarkNextShot(pid)}>
+                      + Next shot
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <button style={{ ...btnPrimary, width: "100%", marginTop: 12, boxSizing: "border-box" }} onClick={onNext}>
+        {isLast ? "Finish hole →" : "Next hole →"}
+      </button>
+    </div>
+  );
+}
+
 /* ================= PLAY TAB ================= */
 function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit, mePlayerId, voiceWakeWord }) {
   /* resume an in-progress round after an accidental tab/app close — read once at mount */
@@ -1587,6 +1707,8 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
   const [scores, setScores] = useState(savedRound?.scores || {});
   const [teamAssign, setTeamAssign] = useState(savedRound?.teamAssign || {});
   const [bbState, setBbState] = useState(savedRound?.bbState || { team1: {}, team2: {} });
+  const [startHole, setStartHole] = useState(savedRound?.startHole || 1);
+  const [activeIdx, setActiveIdx] = useState(savedRound?.activeIdx ?? 0);
   const [driveModal, setDriveModal] = useState(null);
   const [voiceOn, setVoiceOn] = useState(false);
   const [voiceMsg, setVoiceMsg] = useState("");
@@ -1595,6 +1717,12 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
   const course = courses.find((c) => c.id === courseId);
   const livePos = useLivePosition(step === "scoring");
   const mePlayer = players.find((p) => p.id === mePlayerId);
+
+  /* stroke-play per-hole view: holes reordered to start from the chosen tee, one hole "active"
+     (fully visible) at a time; holes before activeIdx have been stepped past and render collapsed */
+  const playOrder = useMemo(() => (course ? playOrderHoles(course.holes, startHole) : []), [course, startHole]);
+  const strokeRoundComplete = format === "stroke" && activeIdx >= playOrder.length;
+  const activeHole = format === "stroke" && !strokeRoundComplete ? playOrder[activeIdx] : null;
 
   useEffect(() => {
     if (!courseId && courses.length) setCourseId(courses[0].id);
@@ -1612,8 +1740,8 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
      lose it — only while actively scoring; the setup screen and finished rounds don't persist */
   useEffect(() => {
     if (step !== "scoring") return;
-    saveKey(ACTIVE_ROUND_KEY, { format, courseId, selected, overrides, scores, teamAssign, bbState });
-  }, [step, format, courseId, selected, overrides, scores, teamAssign, bbState]);
+    saveKey(ACTIVE_ROUND_KEY, { format, courseId, selected, overrides, scores, teamAssign, bbState, startHole, activeIdx });
+  }, [step, format, courseId, selected, overrides, scores, teamAssign, bbState, startHole, activeIdx]);
 
   function togglePlayer(id) {
     if (selected.includes(id)) {
@@ -1639,6 +1767,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
       const init = {};
       selected.forEach((pid) => { init[pid] = {}; });
       setScores(init);
+      setActiveIdx(0);
     } else {
       setBbState({ team1: {}, team2: {} });
     }
@@ -1771,11 +1900,13 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
   const bbStateRef = useRef(bbState);
   const team1IdsRef = useRef(team1Ids);
   const team2IdsRef = useRef(team2Ids);
+  const activeHoleRef = useRef(activeHole);
   useEffect(() => { mePlayerIdRef.current = mePlayerId; }, [mePlayerId]);
   useEffect(() => { livePosRef.current = livePos; }, [livePos]);
   useEffect(() => { courseRef.current = course; }, [course]);
   useEffect(() => { formatRef.current = format; }, [format]);
   useEffect(() => { selectedRef.current = selected; }, [selected]);
+  useEffect(() => { activeHoleRef.current = activeHole; });
   useEffect(() => { scoresRef.current = scores; }, [scores]);
   useEffect(() => { bbStateRef.current = bbState; }, [bbState]);
   useEffect(() => { team1IdsRef.current = team1Ids; });
@@ -1793,8 +1924,15 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
     const me = mePlayerIdRef.current;
     if (!me) { setVoiceMsg("Mark a player as ⭐ you in the Players tab first."); speak("Mark a player as you first."); return; }
     const crs = courseRef.current;
-    const hole = crs ? nearestHoleByPosition(crs.holes, livePosRef.current) : null;
-    if (!hole) { setVoiceMsg(`Heard "${transcript}" but can't tell which hole you're on yet — enable location.`); speak("Can't tell which hole you're on yet."); return; }
+    const hole = formatRef.current === "stroke"
+      ? activeHoleRef.current
+      : crs ? nearestHoleByPosition(crs.holes, livePosRef.current) : null;
+    if (!hole) {
+      const msg = formatRef.current === "stroke"
+        ? "No active hole right now — the round looks finished."
+        : `Heard "${transcript}" but can't tell which hole you're on yet — enable location.`;
+      setVoiceMsg(msg); speak("Can't tell which hole you're on yet."); return;
+    }
 
     if (kind === "unmatched") {
       // deliberately no spoken reply here — a wake word alone shouldn't interrupt mid-swing;
@@ -1841,8 +1979,11 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
 
   useVoiceCaddy(voiceOn && step === "scoring", handleVoiceCommand, voiceWakeWord);
 
-  /* auto shot-stop detection — scoped to "you" only, see computePendingShot/shotDetectorStep */
-  const currentHoleForMe = course && livePos ? nearestHoleByPosition(course.holes, livePos) : null;
+  /* auto shot-stop detection — scoped to "you" only, see computePendingShot/shotDetectorStep.
+     For stroke play the "current hole" is whichever hole is active in the per-hole view (the
+     player chose it), not whatever GPS thinks is nearest; better ball still shows all holes
+     at once so GPS-nearest remains the only sensible way to know which hole a shot belongs to. */
+  const currentHoleForMe = format === "stroke" ? activeHole : (course && livePos ? nearestHoleByPosition(course.holes, livePos) : null);
   const myPending = step === "scoring"
     ? computePendingShot({ hole: currentHoleForMe, format, mePlayerId, selected, scores, bbState, team1Ids, team2Ids })
     : null;
@@ -1962,6 +2103,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
 
   function resetAll() {
     setStep("setup"); setSelected([]); setOverrides({}); setScores({}); setTeamAssign({}); setBbState({ team1: {}, team2: {} });
+    setStartHole(1); setActiveIdx(0);
     saveKey(ACTIVE_ROUND_KEY, null);
     setResumedNotice(false);
   }
@@ -1986,6 +2128,16 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
         <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, marginBottom: 16 }}>
           {format === "betterball" ? "Works as a two-ball (you and a partner sharing one team score) or a four-ball (two teams of two)." : "One to four players, each scored individually."}
         </div>
+
+        {format === "stroke" && course && course.holes.some((h) => h.number === 10) && (
+          <>
+            <div style={{ fontFamily: sans, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: C.turf, margin: "14px 0 8px" }}>Starting hole</div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
+              <button style={{ ...btnGhost, background: startHole === 1 ? C.fairway : C.white, color: startHole === 1 ? C.white : C.fairway }} onClick={() => setStartHole(1)}>1st tee</button>
+              <button style={{ ...btnGhost, background: startHole === 10 ? C.fairway : C.white, color: startHole === 10 ? C.white : C.fairway }} onClick={() => setStartHole(10)}>10th tee</button>
+            </div>
+          </>
+        )}
 
         <div style={{ fontFamily: sans, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: C.turf, margin: "14px 0 8px" }}>
           Select {format === "betterball" ? "2 or 4" : "up to 4"} players
@@ -2042,8 +2194,120 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
     );
   }
 
-  /* ---- scoring: stroke play ---- */
+  /* ---- scoring: stroke play (per-hole focused view) ---- */
   if (format === "stroke") {
+    const totalHoles = playOrder.length;
+    const showHalfway = totalHoles === 18;
+
+    function markDriveForStroke(pid) {
+      const h = activeHole;
+      if (!h) return;
+      setDriveModal({
+        hole: h,
+        label: players.find((p) => p.id === pid)?.name || "Player",
+        shotLabel: "drive",
+        onSave: (yd, lat, lng) => {
+          const result = recordStrokeDrive(pid, h, { lat, lon: lng });
+          if (pid === mePlayerId) announceShotResult(result, { speakAloud: false });
+          setDriveModal(null);
+        },
+      });
+    }
+    function markNextShotForStroke(pid) {
+      const h = activeHole;
+      if (!h) return;
+      const cell = scores[pid]?.[h.number] || {};
+      const extra = cell.extraShots || [];
+      const prevPt = extra.length ? extra[extra.length - 1] : cell.driveLat != null ? { lat: cell.driveLat, lon: cell.driveLon } : null;
+      setDriveModal({
+        hole: h,
+        label: players.find((p) => p.id === pid)?.name || "Player",
+        shotLabel: "next shot",
+        fromLat: prevPt?.lat, fromLon: prevPt?.lon,
+        onSave: (yd, lat, lng) => {
+          const result = recordStrokeNextShot(pid, h, { lat, lon: lng });
+          if (pid === mePlayerId) announceShotResult(result, { speakAloud: false });
+          setDriveModal(null);
+        },
+      });
+    }
+    function subtotalFor(pid, holesSlice) {
+      return holesSlice.reduce((s, h) => s + (Number(scores[pid]?.[h.number]?.gross) || 0), 0);
+    }
+
+    const rows = [];
+    for (let idx = 0; idx < totalHoles; idx++) {
+      const h = playOrder[idx];
+      if (idx < activeIdx) {
+        rows.push(
+          <div
+            key={h.number}
+            onClick={() => setActiveIdx(idx)}
+            style={{ display: "flex", alignItems: "center", padding: "7px 10px", borderBottom: `1px solid ${C.line}`, cursor: "pointer", fontFamily: mono }}
+          >
+            <div style={{ width: 28, fontSize: 13, fontWeight: 700, color: C.ink }}>{h.number}</div>
+            <div style={{ width: 26, fontSize: 12, color: C.turf }}>{h.par}</div>
+            {selected.map((pid) => {
+              const cell = scores[pid]?.[h.number] || {};
+              return (
+                <div key={pid} style={{ flex: 1, minWidth: 0, display: "flex", justifyContent: "center" }}>
+                  <ScoreBadge gross={cell.gross} par={h.par} />
+                </div>
+              );
+            })}
+          </div>
+        );
+      } else if (idx === activeIdx) {
+        rows.push(
+          <StrokeHoleCard
+            key={h.number}
+            hole={h}
+            isLast={idx === totalHoles - 1}
+            players={players}
+            selected={selected}
+            scores={scores}
+            distanceUnit={distanceUnit}
+            livePos={livePos}
+            mePlayer={mePlayer}
+            onScoreField={setScoreField}
+            onMarkDrive={markDriveForStroke}
+            onMarkNextShot={markNextShotForStroke}
+            onNext={() => setActiveIdx((i) => Math.min(i + 1, totalHoles))}
+          />
+        );
+      }
+      if (idx === 8 && showHalfway && idx < activeIdx) {
+        rows.push(
+          <div key="out" style={{ display: "flex", alignItems: "center", padding: "7px 10px", background: C.paper2, borderBottom: `1px solid ${C.line}`, fontFamily: mono, fontWeight: 700 }}>
+            <div style={{ width: 54, fontSize: 12, color: C.fairway }}>OUT</div>
+            {selected.map((pid) => (
+              <div key={pid} style={{ flex: 1, minWidth: 0, textAlign: "center", fontSize: 13 }}>{subtotalFor(pid, playOrder.slice(0, 9))}</div>
+            ))}
+          </div>
+        );
+      }
+    }
+    if (strokeRoundComplete) {
+      if (showHalfway) {
+        rows.push(
+          <div key="in" style={{ display: "flex", alignItems: "center", padding: "7px 10px", background: C.paper2, borderBottom: `1px solid ${C.line}`, fontFamily: mono, fontWeight: 700 }}>
+            <div style={{ width: 54, fontSize: 12, color: C.fairway }}>IN</div>
+            {selected.map((pid) => (
+              <div key={pid} style={{ flex: 1, minWidth: 0, textAlign: "center", fontSize: 13 }}>{subtotalFor(pid, playOrder.slice(9))}</div>
+            ))}
+          </div>
+        );
+      }
+      rows.push(
+        <div key="total" style={{ display: "flex", alignItems: "center", padding: "9px 10px", background: C.fairway, fontFamily: mono, fontWeight: 700 }}>
+          <div style={{ width: 54, fontSize: 12, color: C.white }}>TOTAL</div>
+          {selected.map((pid) => (
+            <div key={pid} style={{ flex: 1, minWidth: 0, textAlign: "center", fontSize: 15, color: C.white }}>{subtotalFor(pid, playOrder)}</div>
+          ))}
+        </div>
+      );
+    }
+
     return (
       <div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10, gap: 8, flexWrap: "wrap" }}>
@@ -2059,142 +2323,25 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
             <button onClick={() => setResumedNotice(false)} style={{ background: "transparent", border: "none", color: C.fairway, cursor: "pointer", fontSize: 14 }}>×</button>
           </div>
         )}
-        <div style={{ overflowX: "auto", border: `1px solid ${C.line}`, borderRadius: 8 }}>
-          <table style={{ borderCollapse: "collapse", width: "100%", fontFamily: mono, fontSize: 13 }}>
-            <thead>
-              <tr style={{ background: C.fairway }}>
-                <th style={{ ...thStyle, color: C.white, background: C.fairway }}>Hole</th>
-                <th style={{ ...thStyle, color: C.white, background: C.fairway }}>Par</th>
-                <th style={{ ...thStyle, color: C.white, background: C.fairway }}>{distanceUnit === "m" ? "m" : "Yds"}</th>
-                {selected.map((pid) => (
-                  <th key={pid} style={{ ...thStyle, color: C.white, background: C.fairway }}>{players.find((p) => p.id === pid)?.name}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {course.holes.map((h) => (
-                <tr key={h.number}>
-                  <td style={tdStyle}>{h.number}</td>
-                  <td style={tdStyle}>{h.par}</td>
-                  <td style={tdStyle}>
-                    {displayDistance(h.yardage, distanceUnit) || "—"}
-                    {h.greenLat != null && livePos && (
-                      <div style={{ fontSize: 11, color: C.turf, fontFamily: sans, marginTop: 2 }}>
-                        📍 {Math.round(displayDistance(haversineYards(livePos.lat, livePos.lon, h.greenLat, h.greenLon), distanceUnit))} live
-                        {mePlayer?.bag?.length > 0 && (() => {
-                          const suggestion = suggestClub(mePlayer.bag, haversineYards(livePos.lat, livePos.lon, h.greenLat, h.greenLon));
-                          return suggestion ? <div style={{ color: C.fairway, fontWeight: 700, marginTop: 1 }}>🎒 {suggestion}</div> : null;
-                        })()}
-                      </div>
-                    )}
-                  </td>
-                  {selected.map((pid) => {
-                    const cell = scores[pid]?.[h.number] || {};
-                    return (
-                      <td key={pid} style={tdStyle}>
-                        <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-                          <input
-                            type="number"
-                            style={{ width: 52, padding: "6px 8px", fontFamily: mono, fontSize: 16, border: `1px solid ${C.line}`, borderRadius: 5 }}
-                            value={cell.gross ?? ""}
-                            onChange={(e) => setScoreField(pid, h.number, "gross", e.target.value)}
-                          />
-                          <ScoreBadge gross={cell.gross} par={h.par} />
-                        </div>
-                        <ShapeSelector par={h.par} value={cell.shape} onChange={(v) => setScoreField(pid, h.number, "shape", v)} />
-                        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 5 }}>
-                          <span style={{ fontSize: 12, color: C.turf, fontFamily: sans }}>Putts</span>
-                          <input
-                            type="number"
-                            style={{ width: 42, padding: "4px 6px", fontFamily: mono, fontSize: 14, border: `1px solid ${C.line}`, borderRadius: 4 }}
-                            value={cell.putts ?? ""}
-                            onChange={(e) => setScoreField(pid, h.number, "putts", e.target.value)}
-                          />
-                        </div>
-                        {h.teeLat != null && (
-                          <button
-                            style={{ ...btnGhost, fontSize: 10, padding: "3px 6px", marginTop: 5 }}
-                            onClick={() => setDriveModal({
-                              hole: h,
-                              label: players.find((p) => p.id === pid)?.name || "Player",
-                              shotLabel: "drive",
-                              onSave: (yd, lat, lng) => {
-                                const result = recordStrokeDrive(pid, h, { lat, lon: lng });
-                                if (pid === mePlayerId) announceShotResult(result, { speakAloud: false });
-                                setDriveModal(null);
-                              },
-                            })}
-                          >
-                            {cell.driveYards ? `📍 ${Math.round(displayDistance(cell.driveYards, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : "📍 Mark drive"}
-                          </button>
-                        )}
-                        <select
-                          style={{ ...inputStyle, width: "100%", padding: "3px 4px", fontSize: 11, marginTop: 5 }}
-                          value={cell.club || ""}
-                          onChange={(e) => setScoreField(pid, h.number, "club", e.target.value || null)}
-                        >
-                          <option value="">Club —</option>
-                          {CLUBS.map((c) => <option key={c} value={c}>{c}</option>)}
-                        </select>
-                        {h.teeLat != null && (
-                          <div style={{ marginTop: 4 }}>
-                            {(cell.extraShots || []).map((es, i) => (
-                              <div key={i} style={{ fontSize: 10, color: C.turf, fontFamily: sans, marginTop: 2, display: "flex", alignItems: "center", gap: 4 }}>
-                                <span>Shot {i + 2}: {es.yards != null ? `${Math.round(displayDistance(es.yards, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : "—"}</span>
-                                <select
-                                  style={{ ...inputStyle, width: 72, padding: "2px 3px", fontSize: 10 }}
-                                  value={es.club || ""}
-                                  onChange={(e) => {
-                                    const next = [...(cell.extraShots || [])];
-                                    next[i] = { ...next[i], club: e.target.value || null };
-                                    setScoreField(pid, h.number, "extraShots", next);
-                                  }}
-                                >
-                                  <option value="">Club —</option>
-                                  {CLUBS.map((c) => <option key={c} value={c}>{c}</option>)}
-                                </select>
-                              </div>
-                            ))}
-                            <button
-                              style={{ ...btnGhost, fontSize: 10, padding: "3px 6px", marginTop: 4 }}
-                              onClick={() => {
-                                const extra = cell.extraShots || [];
-                                const prevPt = extra.length ? extra[extra.length - 1] : cell.driveLat != null ? { lat: cell.driveLat, lon: cell.driveLon } : null;
-                                setDriveModal({
-                                  hole: h,
-                                  label: players.find((p) => p.id === pid)?.name || "Player",
-                                  shotLabel: "next shot",
-                                  fromLat: prevPt?.lat, fromLon: prevPt?.lon,
-                                  onSave: (yd, lat, lng) => {
-                                    const result = recordStrokeNextShot(pid, h, { lat, lon: lng });
-                                    if (pid === mePlayerId) announceShotResult(result, { speakAloud: false });
-                                    setDriveModal(null);
-                                  },
-                                });
-                              }}
-                            >
-                              + Mark next shot
-                            </button>
-                          </div>
-                        )}
-                      </td>
-                    );
-                  })}
-                </tr>
+        <div style={{ border: `1px solid ${C.line}`, borderRadius: 8, overflow: "hidden" }}>
+          {selected.length > 0 && (
+            <div style={{ display: "flex", alignItems: "center", padding: "6px 10px", background: C.fairway, fontFamily: sans, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.03em" }}>
+              <div style={{ width: 28, color: C.white }}>#</div>
+              <div style={{ width: 26 }} />
+              {selected.map((pid) => (
+                <div key={pid} style={{ flex: 1, minWidth: 0, textAlign: "center", color: C.white, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {players.find((p) => p.id === pid)?.name}
+                </div>
               ))}
-              <tr style={{ background: C.paper2, fontWeight: 700 }}>
-                <td style={tdStyle} colSpan={3}>Gross total</td>
-                {selected.map((pid) => {
-                  const gross = course.holes.reduce((s, h) => s + (Number(scores[pid]?.[h.number]?.gross) || 0), 0);
-                  return <td key={pid} style={tdStyle}>{gross}</td>;
-                })}
-              </tr>
-            </tbody>
-          </table>
+            </div>
+          )}
+          {rows}
         </div>
-        <div style={{ marginTop: 16, textAlign: "right" }}>
-          <button style={btnPrimary} onClick={finishStrokeRound}>Finish & save round</button>
-        </div>
+        {strokeRoundComplete && (
+          <div style={{ marginTop: 16, textAlign: "right" }}>
+            <button style={btnPrimary} onClick={finishStrokeRound}>Finish & save round</button>
+          </div>
+        )}
         {driveModal && (
           <DriveMapModal
             hole={driveModal.hole}
