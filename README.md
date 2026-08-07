@@ -120,6 +120,14 @@ Tap the ☆ next to a player's name to mark them ⭐ **as you** — this is a de
 preference (stored in this browser only), not a login. It decides whose bag is used for
 suggestions and where voice-logged clubs get saved.
 
+**Voice caddy name:** at the top of the Players tab, there's a "Voice caddy name" setting —
+type whatever name you want to use as the wake word (e.g. "Charlie") and hit Save. This is
+useful because invented names or wordplay (like "Gaddy", a play on "caddy") don't always
+transcribe reliably; picking a name your phone's recognizer hears clearly — your own name,
+a common word — makes the wake word much more reliable. It's a per-device setting, applies
+to every round on this device, and a "Reset to 'Gaddy'" button brings back the default
+`gaddy`/`caddy`/`caddie` matching if you clear it.
+
 With a player marked as you and a bag filled in, on holes with GPS data (see above) the
 app suggests the club whose carry distance is closest to the live distance remaining —
 shown as "🎒 7 Iron" wherever the live distance-to-green appears, in both individual
@@ -134,7 +142,8 @@ saved bag distances. You can set it by hand, or use voice:
   the button disables itself if your browser can't do it, and it needs microphone
   permission and HTTPS or localhost to work at all).
 - Say something containing "Gaddy" (or "caddy"/"caddie" — recognizers hear it various
-  ways) plus a club name, e.g. **"Hey Gaddy, I'm using a 6 iron."**
+  ways, and this is also the default if you haven't set a custom name — see "Voice caddy
+  name" above) plus a club name, e.g. **"Hey Gaddy, I'm using a 6 iron."**
 - Or say **"Hey Gaddy, record shot"** (no club needed) to mark a shot at your current
   GPS position — your drive, or your next shot if the drive's already marked — and hear
   the distance and suggested next club spoken back.

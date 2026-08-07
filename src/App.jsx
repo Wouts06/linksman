@@ -126,8 +126,19 @@ function matchClubFromSpeech(transcript) {
   for (const k of CLUB_ALIAS_KEYS) if (t.includes(k)) return CLUB_ALIASES[k];
   return null;
 }
-function heardWakeWord(transcript) {
-  return /gaddy|caddy|caddie/i.test(transcript || "");
+/* "Gaddy" is a pun on "caddy" that doesn't transcribe reliably for everyone — letting each
+   user pick their own wake word (stored in golf:settings, see the App component) fixes that
+   without hardcoding one spelling. Falls back to the original gaddy/caddy/caddie set when no
+   custom word has been chosen, so existing behavior is unchanged for anyone who doesn't set one. */
+const DEFAULT_WAKE_WORD_PATTERN = /gaddy|caddy|caddie/i;
+function wakeWordRegex(customWord) {
+  const w = (customWord || "").trim();
+  if (!w) return DEFAULT_WAKE_WORD_PATTERN;
+  const escaped = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); // a typed name could contain regex-special characters
+  return new RegExp(escaped, "i");
+}
+function heardWakeWord(transcript, customWord) {
+  return wakeWordRegex(customWord).test(transcript || "");
 }
 /* "Hey Gaddy, record shot" (or "log/mark shot") — a separate command from naming a club,
    checked before club-matching so "record shot" alone (no club name) still does something. */
@@ -190,10 +201,12 @@ function suggestClub(bag, remainingYards) {
    error gets surfaced (throttled to at most once every few seconds, since continuous mode
    auto-restarts after an error and a browser that can never succeed would otherwise spam this
    on every restart). */
-function useVoiceCaddy(active, onCommand) {
+function useVoiceCaddy(active, onCommand, wakeWord) {
   const recRef = useRef(null);
   const activeRef = useRef(active);
+  const wakeWordRef = useRef(wakeWord);
   useEffect(() => { activeRef.current = active; }, [active]);
+  useEffect(() => { wakeWordRef.current = wakeWord; }, [wakeWord]); // read live so a mid-round rename takes effect without toggling voice caddy off/on
   useEffect(() => {
     if (!active) return;
     const SR = (typeof window !== "undefined") && (window.SpeechRecognition || window.webkitSpeechRecognition);
@@ -205,7 +218,7 @@ function useVoiceCaddy(active, onCommand) {
     let lastErrorAt = 0;
     rec.onresult = (e) => {
       const transcript = e.results[e.results.length - 1][0].transcript;
-      if (!heardWakeWord(transcript)) return;
+      if (!heardWakeWord(transcript, wakeWordRef.current)) return;
       if (heardRecordShotCommand(transcript)) { onCommand("recordShot", null, transcript); return; }
       const club = matchClubFromSpeech(transcript);
       if (club) { onCommand("club", club, transcript); return; }
@@ -595,12 +608,13 @@ function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, d
   );
 }
 
-function VoiceCaddyButton({ voiceOn, setVoiceOn, voiceMsg, mePlayer }) {
+function VoiceCaddyButton({ voiceOn, setVoiceOn, voiceMsg, mePlayer, wakeWord }) {
   const supported = voiceSupported();
+  const name = (wakeWord || "").trim() || "Gaddy";
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
       <button
-        title={!supported ? "Voice control needs a browser with speech recognition (Chrome works best)" : !mePlayer ? "Mark a player as ⭐ you in the Players tab first" : voiceOn ? "Listening for \"Hey Gaddy, I'm using a...\" or \"Hey Gaddy, record shot\"" : "Turn on voice caddy"}
+        title={!supported ? "Voice control needs a browser with speech recognition (Chrome works best)" : !mePlayer ? "Mark a player as ⭐ you in the Players tab first" : voiceOn ? `Listening for "Hey ${name}, I'm using a..." or "Hey ${name}, record shot"` : "Turn on voice caddy"}
         disabled={!supported}
         onClick={() => setVoiceOn(!voiceOn)}
         style={{
@@ -1035,9 +1049,12 @@ function GolfBagEditor({ bag, onChange, distanceUnit }) {
   );
 }
 
-function PlayersTab({ players, setPlayers, distanceUnit, mePlayerId, setMePlayerId }) {
+function PlayersTab({ players, setPlayers, distanceUnit, mePlayerId, setMePlayerId, voiceWakeWord, setVoiceWakeWord }) {
   const [name, setName] = useState("");
   const [expanded, setExpanded] = useState(null);
+  const [wakeWordDraft, setWakeWordDraft] = useState(voiceWakeWord || "");
+
+  useEffect(() => { setWakeWordDraft(voiceWakeWord || ""); }, [voiceWakeWord]);
 
   function addPlayer() {
     if (!name.trim()) return;
@@ -1051,9 +1068,35 @@ function PlayersTab({ players, setPlayers, distanceUnit, mePlayerId, setMePlayer
   function updateBag(pid, nextBag) {
     setPlayers(players.map((p) => (p.id === pid ? { ...p, bag: nextBag } : p)));
   }
+  const effectiveWakeWord = (voiceWakeWord || "").trim() || "Gaddy";
 
   return (
     <div>
+      <div style={{ ...cardStyle, marginBottom: 18 }}>
+        <div style={{ fontFamily: sans, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: C.turf, marginBottom: 6 }}>
+          Voice caddy name
+        </div>
+        <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, marginBottom: 10 }}>
+          Say "Hey {effectiveWakeWord}" to trigger voice commands during a round. "Gaddy" (a play on
+          "caddy") doesn't transcribe reliably for everyone — pick something your phone hears clearly,
+          like your own name or "Charlie". Applies to every round on this device, for anyone using it.
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <input
+            style={{ ...inputStyle, maxWidth: 220 }}
+            placeholder="Gaddy"
+            value={wakeWordDraft}
+            onChange={(e) => setWakeWordDraft(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && setVoiceWakeWord(wakeWordDraft.trim())}
+          />
+          <button style={btnGhost} onClick={() => setVoiceWakeWord(wakeWordDraft.trim())}>Save</button>
+          {(voiceWakeWord || "").trim() && (
+            <button style={{ ...btnGhost, borderColor: C.flag, color: C.flag }} onClick={() => { setWakeWordDraft(""); setVoiceWakeWord(""); }}>
+              Reset to "Gaddy"
+            </button>
+          )}
+        </div>
+      </div>
       <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
         <input style={inputStyle} placeholder="Player name" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addPlayer()} />
         <button style={btnPrimary} onClick={addPlayer}>Add player</button>
@@ -1363,7 +1406,7 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
 }
 
 /* ================= PLAY TAB ================= */
-function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit, mePlayerId }) {
+function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit, mePlayerId, voiceWakeWord }) {
   /* resume an in-progress round after an accidental tab/app close — read once at mount */
   const [savedRound] = useState(() => loadKey(ACTIVE_ROUND_KEY, null));
   const [step, setStep] = useState(savedRound ? "scoring" : "setup");
@@ -1626,7 +1669,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
     }
   }, []);
 
-  useVoiceCaddy(voiceOn && step === "scoring", handleVoiceCommand);
+  useVoiceCaddy(voiceOn && step === "scoring", handleVoiceCommand, voiceWakeWord);
 
   /* auto shot-stop detection — scoped to "you" only, see computePendingShot/shotDetectorStep */
   const currentHoleForMe = course && livePos ? nearestHoleByPosition(course.holes, livePos) : null;
@@ -1836,7 +1879,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10, gap: 8, flexWrap: "wrap" }}>
           <div style={{ fontFamily: serif, fontSize: 19, color: C.fairway }}>{course.name}</div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <VoiceCaddyButton voiceOn={voiceOn} setVoiceOn={setVoiceOn} voiceMsg={voiceMsg} mePlayer={mePlayer} />
+            <VoiceCaddyButton voiceOn={voiceOn} setVoiceOn={setVoiceOn} voiceMsg={voiceMsg} mePlayer={mePlayer} wakeWord={voiceWakeWord} />
             <button style={{ ...btnGhost, fontSize: 12 }} onClick={abandonRound}>← Back to setup</button>
           </div>
         </div>
@@ -2059,7 +2102,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4, gap: 8, flexWrap: "wrap" }}>
         <div style={{ fontFamily: serif, fontSize: 19, color: C.fairway }}>{course.name} — Better Ball</div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <VoiceCaddyButton voiceOn={voiceOn} setVoiceOn={setVoiceOn} voiceMsg={voiceMsg} mePlayer={mePlayer} />
+          <VoiceCaddyButton voiceOn={voiceOn} setVoiceOn={setVoiceOn} voiceMsg={voiceMsg} mePlayer={mePlayer} wakeWord={voiceWakeWord} />
           <button style={{ ...btnGhost, fontSize: 12 }} onClick={abandonRound}>← Back to setup</button>
         </div>
       </div>
@@ -2322,19 +2365,30 @@ export default function App() {
   const [loaded, setLoaded] = useState(false);
   const [location, setLocation] = useState(null);
   const [distanceUnit, setDistanceUnitState] = useState("yd");
+  const [voiceWakeWord, setVoiceWakeWordState] = useState("");
   const [mePlayerId, setMePlayerIdState] = useState(null);
 
   useEffect(() => {
     setCoursesState(loadKey("golf:courses", []));
     setPlayersState(loadKey("golf:players", []));
     setRoundsState(loadKey("golf:rounds", []));
-    const settings = loadKey("golf:settings", { distanceUnit: "yd" });
+    const settings = loadKey("golf:settings", { distanceUnit: "yd", voiceWakeWord: "" });
     setDistanceUnitState(settings?.distanceUnit === "m" ? "m" : "yd");
+    setVoiceWakeWordState(typeof settings?.voiceWakeWord === "string" ? settings.voiceWakeWord : "");
     setMePlayerIdState(loadKey("golf:mePlayerId", null));
     setLoaded(true);
   }, []);
 
-  const setDistanceUnit = useCallback((u) => { setDistanceUnitState(u); saveKey("golf:settings", { distanceUnit: u }); }, []);
+  /* both settings live in the one "golf:settings" object — always read-merge-write so toggling
+     one (e.g. the yd/m switch) can never silently wipe out the other */
+  const setDistanceUnit = useCallback((u) => {
+    setDistanceUnitState(u);
+    saveKey("golf:settings", { ...loadKey("golf:settings", {}), distanceUnit: u });
+  }, []);
+  const setVoiceWakeWord = useCallback((w) => {
+    setVoiceWakeWordState(w);
+    saveKey("golf:settings", { ...loadKey("golf:settings", {}), voiceWakeWord: w });
+  }, []);
   const setMePlayerId = useCallback((id) => { setMePlayerIdState(id); saveKey("golf:mePlayerId", id); }, []);
 
   const setCourses = useCallback((next) => { setCoursesState(next); saveKey("golf:courses", next); }, []);
@@ -2381,9 +2435,9 @@ export default function App() {
         </div>
       </div>
       <div style={{ maxWidth: 960, margin: "0 auto", padding: "22px 20px 60px" }}>
-        {tab === "play" && <PlayTab courses={courses} players={players} setPlayers={setPlayers} rounds={rounds} setRounds={setRounds} distanceUnit={distanceUnit} mePlayerId={mePlayerId} />}
+        {tab === "play" && <PlayTab courses={courses} players={players} setPlayers={setPlayers} rounds={rounds} setRounds={setRounds} distanceUnit={distanceUnit} mePlayerId={mePlayerId} voiceWakeWord={voiceWakeWord} />}
         {tab === "courses" && <CoursesTab courses={courses} setCourses={setCourses} location={location} requestLocation={requestLocation} distanceUnit={distanceUnit} />}
-        {tab === "players" && <PlayersTab players={players} setPlayers={setPlayers} distanceUnit={distanceUnit} mePlayerId={mePlayerId} setMePlayerId={setMePlayerId} />}
+        {tab === "players" && <PlayersTab players={players} setPlayers={setPlayers} distanceUnit={distanceUnit} mePlayerId={mePlayerId} setMePlayerId={setMePlayerId} voiceWakeWord={voiceWakeWord} setVoiceWakeWord={setVoiceWakeWord} />}
         {tab === "history" && <HistoryTab rounds={rounds} players={players} courses={courses} distanceUnit={distanceUnit} />}
       </div>
     </div>
