@@ -797,6 +797,21 @@ const btnDanger = {
 const thStyle = { textAlign: "left", padding: "9px 12px", borderBottom: `1px solid ${C.line}`, fontSize: 12, textTransform: "uppercase", color: C.turf };
 const tdStyle = { padding: "9px 12px", borderBottom: `1px solid ${C.line}`, fontSize: 14 };
 const cardStyle = { background: C.white, border: `1px solid ${C.line}`, borderRadius: 8, padding: "16px 18px" };
+
+/* compact table cell styles for the manual hole-entry grid specifically — that table has 5
+   columns of mostly short values (numbers, a two-letter unit) packed into a narrow phone
+   width, so it gets much tighter padding than the general-purpose thStyle/tdStyle above */
+const holeThStyle = { textAlign: "center", padding: "6px 3px", borderBottom: `1px solid ${C.line}`, fontSize: 11, textTransform: "uppercase", color: C.turf };
+const holeTdStyle = { padding: "5px 3px", borderBottom: `1px solid ${C.line}`, fontSize: 13, textAlign: "center" };
+/* select with the browser's native appearance stripped so the chosen value is actually visible
+   next to a small custom arrow, instead of the native control hiding the value behind its own
+   arrow when squeezed into a narrow table cell (what was happening with the Par dropdown) */
+const holeSelectStyle = {
+  ...inputStyle, padding: "4px 16px 4px 2px", fontSize: 13, textAlign: "center", textAlignLast: "center",
+  appearance: "none", WebkitAppearance: "none", MozAppearance: "none",
+  backgroundImage: "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='5' viewBox='0 0 10 6'><path d='M0 0l5 6 5-6z' fill='%234b5d4a'/></svg>\")",
+  backgroundRepeat: "no-repeat", backgroundPosition: "right 2px center",
+};
 const emptyStyle = { fontFamily: sans, fontSize: 15, color: C.turf, padding: "24px 0", textAlign: "center" };
 
 /* ================= COURSES TAB ================= */
@@ -1094,29 +1109,37 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
           </div>
 
           <div style={{ maxHeight: 320, overflowY: "auto", border: `1px solid ${C.line}`, borderRadius: 6 }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: mono, fontSize: 13 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontFamily: mono, fontSize: 13 }}>
+              <colgroup>
+                <col style={{ width: "12%" }} /><col style={{ width: "16%" }} /><col style={{ width: "30%" }} /><col style={{ width: "24%" }} /><col style={{ width: "18%" }} />
+              </colgroup>
               <thead>
                 <tr style={{ background: C.paper, position: "sticky", top: 0 }}>
-                  <th style={thStyle}>Hole</th><th style={thStyle}>Par</th><th style={thStyle}>Distance ({distanceUnit === "m" ? "m" : "yd"})</th><th style={thStyle}>Stroke Idx</th><th style={thStyle}>GPS</th>
+                  <th style={holeThStyle}>Hole</th><th style={holeThStyle}>Par</th><th style={holeThStyle}>Dist ({distanceUnit === "m" ? "m" : "yd"})</th><th style={holeThStyle}>Str. Idx</th><th style={holeThStyle}>GPS</th>
                 </tr>
               </thead>
               <tbody>
                 {holes.map((h, i) => (
                   <tr key={i}>
-                    <td style={tdStyle}>{h.number}</td>
-                    <td style={tdStyle}>
-                      <select style={{ ...inputStyle, padding: "4px 6px" }} value={h.par} onChange={(e) => updateHole(i, "par", e.target.value)}>
+                    <td style={holeTdStyle}>{h.number}</td>
+                    <td style={holeTdStyle}>
+                      <select style={holeSelectStyle} value={h.par} onChange={(e) => updateHole(i, "par", e.target.value)}>
                         {[3, 4, 5].map((p) => <option key={p} value={p}>{p}</option>)}
                       </select>
                     </td>
-                    <td style={tdStyle}>
-                      <input style={{ ...inputStyle, padding: "4px 6px" }}
+                    <td style={holeTdStyle}>
+                      <input style={{ ...inputStyle, padding: "4px 3px", fontSize: 13, textAlign: "center" }}
                         value={displayDistance(h.yardage, distanceUnit)}
                         onChange={(e) => updateHole(i, "yardage", toYardsFromInput(e.target.value, distanceUnit))}
                         placeholder={distanceUnit === "m" ? "m" : "yds"} />
                     </td>
-                    <td style={tdStyle}><input style={{ ...inputStyle, padding: "4px 6px" }} value={h.strokeIndex} onChange={(e) => updateHole(i, "strokeIndex", e.target.value)} placeholder="1-18" /></td>
-                    <td style={{ ...tdStyle, textAlign: "center" }} title={h.greenLat != null ? "Tee/green GPS from OpenStreetMap — live distance & drive tracking available" : "No GPS data for this hole"}>
+                    <td style={holeTdStyle}>
+                      <select style={holeSelectStyle} value={h.strokeIndex} onChange={(e) => updateHole(i, "strokeIndex", e.target.value)}>
+                        <option value="">–</option>
+                        {Array.from({ length: 18 }, (_, k) => k + 1).map((n) => <option key={n} value={n}>{n}</option>)}
+                      </select>
+                    </td>
+                    <td style={holeTdStyle} title={h.greenLat != null ? "Tee/green GPS from OpenStreetMap — live distance & drive tracking available" : "No GPS data for this hole"}>
                       {h.greenLat != null ? "📍" : "—"}
                     </td>
                   </tr>
