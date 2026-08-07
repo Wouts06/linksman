@@ -708,7 +708,7 @@ function VoiceCaddyButton({ voiceOn, setVoiceOn, voiceMsg, mePlayer, wakeWord })
         disabled={!supported}
         onClick={() => setVoiceOn(!voiceOn)}
         style={{
-          ...btnGhost, fontSize: 12, padding: "7px 12px",
+          ...btnGhost, fontSize: 12, whiteSpace: "nowrap",
           background: voiceOn ? C.flag : C.white, color: voiceOn ? C.white : C.fairway, borderColor: voiceOn ? C.flag : C.fairway,
           opacity: supported ? 1 : 0.5, cursor: supported ? "pointer" : "not-allowed",
         }}
@@ -2243,7 +2243,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
           <div
             key={h.number}
             onClick={() => setActiveIdx(idx)}
-            style={{ display: "flex", alignItems: "center", padding: "7px 10px", borderBottom: `1px solid ${C.line}`, cursor: "pointer", fontFamily: mono }}
+            style={{ display: "flex", alignItems: "center", padding: "7px 10px", background: idx % 2 === 0 ? C.white : C.paper, borderBottom: `1px solid ${C.line}`, cursor: "pointer", fontFamily: mono }}
           >
             <div style={{ width: 28, fontSize: 13, fontWeight: 700, color: C.ink }}>{h.number}</div>
             <div style={{ width: 26, fontSize: 12, color: C.turf }}>{h.par}</div>
@@ -2278,8 +2278,8 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
       }
       if (idx === 8 && showHalfway && idx < activeIdx) {
         rows.push(
-          <div key="out" style={{ display: "flex", alignItems: "center", padding: "7px 10px", background: C.paper2, borderBottom: `1px solid ${C.line}`, fontFamily: mono, fontWeight: 700 }}>
-            <div style={{ width: 54, fontSize: 12, color: C.fairway }}>OUT</div>
+          <div key="out" style={{ display: "flex", alignItems: "center", padding: "7px 10px", background: C.line, borderBottom: `1px solid ${C.line}`, fontFamily: mono, fontWeight: 700 }}>
+            <div style={{ width: 54, fontSize: 12, color: C.fairwayDark }}>OUT</div>
             {selected.map((pid) => (
               <div key={pid} style={{ flex: 1, minWidth: 0, textAlign: "center", fontSize: 13 }}>{subtotalFor(pid, playOrder.slice(0, 9))}</div>
             ))}
@@ -2290,8 +2290,8 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
     if (strokeRoundComplete) {
       if (showHalfway) {
         rows.push(
-          <div key="in" style={{ display: "flex", alignItems: "center", padding: "7px 10px", background: C.paper2, borderBottom: `1px solid ${C.line}`, fontFamily: mono, fontWeight: 700 }}>
-            <div style={{ width: 54, fontSize: 12, color: C.fairway }}>IN</div>
+          <div key="in" style={{ display: "flex", alignItems: "center", padding: "7px 10px", background: C.line, borderBottom: `1px solid ${C.line}`, fontFamily: mono, fontWeight: 700 }}>
+            <div style={{ width: 54, fontSize: 12, color: C.fairwayDark }}>IN</div>
             {selected.map((pid) => (
               <div key={pid} style={{ flex: 1, minWidth: 0, textAlign: "center", fontSize: 13 }}>{subtotalFor(pid, playOrder.slice(9))}</div>
             ))}
