@@ -99,6 +99,18 @@ function useLivePosition(active) {
 /* ---------- golf bag / club suggestion / voice caddy ---------- */
 const CLUBS = ["Driver", "3 Wood", "5 Wood", "3 Hybrid", "4 Hybrid", "3 Iron", "4 Iron", "5 Iron", "6 Iron", "7 Iron", "8 Iron", "9 Iron", "PW", "GW", "SW", "LW", "Putter"];
 
+/* Short display labels for the golf bag checklist ONLY — purely cosmetic, to keep that list
+   compact on narrow screens. The canonical club name (CLUBS, above) is still what's stored,
+   matched against CLUB_ALIASES for voice recognition, and shown everywhere else (scoring,
+   history) — abbreviating here doesn't change what the voice caddy understands or what gets
+   saved; "Hey Gaddy, 7 iron" still resolves to the same club whether its bag checkbox reads
+   "7 Iron" or "7i". */
+const CLUB_ABBREV = {
+  "Driver": "Dr", "3 Wood": "3w", "5 Wood": "5w", "3 Hybrid": "3h", "4 Hybrid": "4h",
+  "3 Iron": "3i", "4 Iron": "4i", "5 Iron": "5i", "6 Iron": "6i", "7 Iron": "7i", "8 Iron": "8i", "9 Iron": "9i",
+  "PW": "PW", "GW": "GW", "SW": "SW", "LW": "LW", "Putter": "Pt",
+};
+
 /* spoken-word aliases → canonical club name, checked longest-phrase-first so "six iron" beats a bare "iron" */
 const CLUB_ALIASES = {
   "driver": "Driver",
@@ -1154,20 +1166,24 @@ function setBagDistance(bag, club, yards) {
 
 function GolfBagEditor({ bag, onChange, distanceUnit }) {
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 14px" }}>
+    // minmax(0, 1fr) (not plain 1fr) lets each column shrink below its content's natural
+    // width instead of forcing the grid wider than its container — combined with the
+    // abbreviated labels below and minWidth:0 on the row/input, this is what actually keeps
+    // the whole editor inside the card instead of needing horizontal scroll.
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "4px 10px", width: "100%", boxSizing: "border-box" }}>
       {CLUBS.map((club) => {
         const has = bagHasClub(bag, club);
         const yards = bagDistance(bag, club);
         return (
-          <div key={club} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}>
-            <label style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: sans, fontSize: 13, color: C.ink, minWidth: 100, cursor: "pointer" }}>
+          <div key={club} style={{ display: "flex", alignItems: "center", gap: 6, padding: "3px 0", minWidth: 0 }}>
+            <label title={club} style={{ display: "flex", alignItems: "center", gap: 5, fontFamily: sans, fontSize: 13, color: C.ink, cursor: "pointer", flexShrink: 0 }}>
               <input type="checkbox" checked={has} onChange={() => onChange(toggleBagClub(bag, club))} />
-              {club}
+              {CLUB_ABBREV[club] || club}
             </label>
             {has && (
               <input
                 type="number"
-                style={{ ...inputStyle, width: 76, padding: "5px 8px" }}
+                style={{ ...inputStyle, width: 56, minWidth: 0, padding: "5px 6px" }}
                 placeholder={distanceUnit === "m" ? "m" : "yds"}
                 value={displayDistance(yards, distanceUnit)}
                 onChange={(e) => onChange(setBagDistance(bag, club, toYardsFromInput(e.target.value, distanceUnit)))}
