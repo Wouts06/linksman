@@ -121,16 +121,32 @@ function useLivePosition(active) {
 function useCompassHeading(active) {
   const [heading, setHeading] = useState(null);
   const [signal, setSignal] = useState("waiting"); // "waiting" | "receiving" | "stalled" — "stalled" surfaces a hint that no orientation events arrived at all (a different, deeper problem than the absolute-flag bug above)
+  const [diagnostic, setDiagnostic] = useState(null); // extra info gathered once "stalled", to make the hint actionable instead of a dead end — see note below
   const needsIOSPermission = typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function";
   const [permission, setPermission] = useState(needsIOSPermission ? "prompt" : "granted");
   const gotAbsoluteRef = useRef(false);
   const gotAnyEventRef = useRef(false);
+
+  // Real-world report (11 Aug, Samsung Galaxy S24 FE): the "stalled" hint above fired with truly
+  // zero usable orientation events reaching the page — a different, deeper problem than the
+  // absolute-flag bug this hook already works around. Chrome for Android doesn't gate
+  // deviceorientation behind a JS-visible permission prompt the way iOS Safari does, so a silent
+  // failure here can mean several very different things: (1) the browser isn't actually Chrome —
+  // Samsung phones often route links through Samsung Internet even when the user thinks they're
+  // "in Chrome" (share-sheet/notification links, or Samsung Internet set as the default handler);
+  // (2) Chrome's per-site "Motion sensors" permission (chrome://settings/content/sensors, or the
+  // site info/padlock icon → Permissions) is set to Block; (3) some Samsung One UI phones have a
+  // system-wide Quick Panel "Sensors off" toggle that silently kills motion data for every app,
+  // browser included. `navigator.permissions.query` for "accelerometer"/"magnetometer" is
+  // Chrome-supported and can at least confirm case (2) directly instead of guessing.
+  const isSamsungBrowser = typeof navigator !== "undefined" && /SamsungBrowser/i.test(navigator.userAgent || "");
 
   useEffect(() => {
     if (!active || permission !== "granted" || typeof window === "undefined") return;
     gotAbsoluteRef.current = false;
     gotAnyEventRef.current = false;
     setSignal("waiting");
+    setDiagnostic(null);
     function handle(e) {
       let h = null;
       if (e.webkitCompassHeading != null) {
@@ -157,7 +173,18 @@ function useCompassHeading(active) {
     }
     window.addEventListener("deviceorientationabsolute", handle, true);
     window.addEventListener("deviceorientation", handle, true);
-    const stalledTimer = setTimeout(() => { if (!gotAnyEventRef.current) setSignal("stalled"); }, 5000);
+    const stalledTimer = setTimeout(() => {
+      if (gotAnyEventRef.current) return;
+      setSignal("stalled");
+      // best-effort: query() can throw/reject on browsers that don't recognize these permission
+      // names at all (not just Chrome variants) — swallow and just skip the extra diagnostic
+      Promise.all([
+        navigator.permissions?.query?.({ name: "accelerometer" }).catch(() => null),
+        navigator.permissions?.query?.({ name: "magnetometer" }).catch(() => null),
+      ]).then(([accel, mag]) => {
+        if (accel?.state === "denied" || mag?.state === "denied") setDiagnostic("permission-denied");
+      }).catch(() => {});
+    }, 5000);
     return () => {
       window.removeEventListener("deviceorientationabsolute", handle, true);
       window.removeEventListener("deviceorientation", handle, true);
@@ -175,7 +202,7 @@ function useCompassHeading(active) {
     }
   }, [needsIOSPermission]);
 
-  return { heading, permission, needsIOSPermission, requestPermission, signal };
+  return { heading, permission, needsIOSPermission, requestPermission, signal, diagnostic, isSamsungBrowser };
 }
 
 /* ---------- golf bag / club suggestion / voice caddy ---------- */
@@ -597,7 +624,16 @@ function WindIndicator({ wind, compass, unit }) {
           <div style={{ fontSize: 10, color: C.turf, marginTop: 3 }}>Compass permission denied — arrow shown relative to true north.</div>
         )}
         {compass.permission === "granted" && compass.signal === "stalled" && (
-          <div style={{ fontSize: 10, color: C.turf, marginTop: 3 }}>No compass signal from this browser/device — dial won't rotate as you turn.</div>
+          <div style={{ fontSize: 10, color: C.turf, marginTop: 3, lineHeight: 1.5 }}>
+            No compass signal — dial won't rotate as you turn.{" "}
+            {compass.isSamsungBrowser ? (
+              "This looks like Samsung Internet rather than Chrome — try opening this site in Chrome instead."
+            ) : compass.diagnostic === "permission-denied" ? (
+              "Motion sensors look blocked for this site — tap the site info (ⓘ or padlock) icon in the address bar → Permissions → Motion sensors, and allow it."
+            ) : (
+              "On Samsung phones, check the Quick Panel for a \"Sensors off\" toggle (turn it off), and make sure you're opening this in Chrome, not Samsung Internet."
+            )}
+          </div>
         )}
       </div>
     </div>
