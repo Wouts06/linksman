@@ -114,6 +114,30 @@ One honest limitation: consumer phone GPS is typically accurate to a few meters 
 so treat the live distance and drive-distance numbers as a close estimate, not a laser
 rangefinder-grade measurement — same as most golf GPS apps.
 
+## Wind indicator
+
+A small panel above the scorecard, while actively scoring, shows current wind conditions from
+[Open-Meteo](https://open-meteo.com) (free, no API key) — wind speed, gusts (when the model
+reports them), and a compass dial with an arrow pointing the direction the wind is blowing
+*toward* (wind-sock/flag style, the way you'd already read a flag on the course), alongside a
+text label giving the direction it's blowing *from* (standard forecast phrasing, e.g. "8 mph
+from NW"). Location for the lookup is the course's own saved coordinates when it has any
+(stable — doesn't refetch as you walk the course), falling back to your first GPS fix of the
+round otherwise. Refreshes automatically every 10 minutes; wind doesn't need tracking hole to
+hole, and the underlying forecast model itself only updates roughly that often.
+
+**Live compass rotation:** on Android/most browsers this just works — no permission prompt,
+the dial starts tracking your phone's heading as soon as you're on the scoring screen, so
+turning to face down the fairway keeps the wind arrow correctly oriented to the real world. iOS
+13+ Safari requires an explicit tap (`DeviceOrientationEvent.requestPermission()` can only be
+triggered by a user gesture) — a "🧭 Enable live compass" button appears under the wind reading
+on iOS until you tap it once; if you deny it, the dial still shows the wind's direction, just
+without live rotation as you turn. This doesn't compensate for screen rotation (landscape use),
+only portrait.
+
+If neither the course nor your GPS has a location yet, the panel simply doesn't render — no
+error banner for what's an optional feature.
+
 ## Golf bag, club suggestions & voice caddy
 
 Each player has a **Golf bag** section in the Players tab (expand their card): tick which

@@ -96,6 +96,52 @@ function useLivePosition(active) {
   return pos;
 }
 
+/* live device compass heading, 0-360° clockwise from true/magnetic north — powers the wind
+   indicator's "rotate as the phone turns" behavior. Two very different platform APIs:
+   - iOS 13+ Safari: DeviceOrientationEvent.requestPermission() must be called from a user
+     gesture before any orientation events fire at all; once granted, events carry a ready-to-use
+     `webkitCompassHeading` (already a true-north compass bearing, no math needed).
+   - Everyone else (Android Chrome, etc.): no JS-triggerable permission gate — events just fire
+     (assuming the browser/OS-level motion-sensor permission is allowed). The dedicated
+     'deviceorientationabsolute' event (or a plain 'deviceorientation' event with `absolute:
+     true`) carries `alpha`, which increases counter-clockwise from the device's start position;
+     converting to a compass bearing is `(360 - alpha) % 360`.
+   Known limitation: this doesn't compensate for screen rotation (landscape use) — fine for a
+   golf app used portrait-in-hand, but heading would read off by 90°/180° in landscape. */
+function useCompassHeading(active) {
+  const [heading, setHeading] = useState(null);
+  const needsIOSPermission = typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function";
+  const [permission, setPermission] = useState(needsIOSPermission ? "prompt" : "granted");
+
+  useEffect(() => {
+    if (!active || permission !== "granted" || typeof window === "undefined") return;
+    function handle(e) {
+      let h = null;
+      if (e.webkitCompassHeading != null) h = e.webkitCompassHeading;
+      else if (e.alpha != null && (e.absolute || e.type === "deviceorientationabsolute")) h = (360 - e.alpha) % 360;
+      if (h != null && !Number.isNaN(h)) setHeading(h);
+    }
+    window.addEventListener("deviceorientationabsolute", handle, true);
+    window.addEventListener("deviceorientation", handle, true);
+    return () => {
+      window.removeEventListener("deviceorientationabsolute", handle, true);
+      window.removeEventListener("deviceorientation", handle, true);
+    };
+  }, [active, permission]);
+
+  const requestPermission = useCallback(async () => {
+    if (!needsIOSPermission) { setPermission("granted"); return; }
+    try {
+      const result = await DeviceOrientationEvent.requestPermission();
+      setPermission(result === "granted" ? "granted" : "denied");
+    } catch {
+      setPermission("denied");
+    }
+  }, [needsIOSPermission]);
+
+  return { heading, permission, needsIOSPermission, requestPermission };
+}
+
 /* ---------- golf bag / club suggestion / voice caddy ---------- */
 const CLUBS = ["Driver", "3 Wood", "5 Wood", "3 Hybrid", "4 Hybrid", "3 Iron", "4 Iron", "5 Iron", "6 Iron", "7 Iron", "8 Iron", "9 Iron", "PW", "GW", "SW", "LW", "Putter"];
 
@@ -405,6 +451,118 @@ async function fetchWithTimeout(url, options, timeoutMs) {
   } finally {
     clearTimeout(id);
   }
+}
+
+/* ---------- wind indicator ---------- */
+const COMPASS_POINTS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
+function compassPointFromDegrees(deg) {
+  if (deg == null) return "";
+  return COMPASS_POINTS[Math.round(deg / 22.5) % 16];
+}
+
+/* live wind speed/gust/direction for a fixed lat/lon, via our own /api/wind proxy (mirrors the
+   osm-* proxies — same reasoning: browser fetch() can't set a User-Agent, and it's one less
+   external-API assumption to leave unverified after the OSM Nominatim/Overpass lesson earlier
+   in this project). Refetches on an interval rather than reacting to every GPS update — wind
+   barely changes hole to hole, and the underlying model itself only updates ~every 15 minutes,
+   so there's nothing to gain from fetching more often than a golfer plays a few holes. */
+function useWindData(lat, lon, unit) {
+  const [state, setState] = useState({ speed: null, gust: null, direction: null, loading: false, error: null });
+  useEffect(() => {
+    if (lat == null || lon == null) return;
+    let cancelled = false;
+    async function load() {
+      setState((s) => ({ ...s, loading: true, error: null }));
+      try {
+        const url = `/api/wind?lat=${lat}&lon=${lon}&unit=${unit === "kmh" ? "kmh" : "mph"}`;
+        const res = await fetchWithTimeout(url, { headers: { Accept: "application/json" } }, 10000);
+        if (!res.ok) throw new Error("Wind lookup failed");
+        const data = await res.json();
+        const c = data.current || {};
+        if (!cancelled) {
+          setState({
+            speed: c.wind_speed_10m ?? null,
+            gust: c.wind_gusts_10m ?? null,
+            direction: c.wind_direction_10m ?? null,
+            loading: false, error: null,
+          });
+        }
+      } catch {
+        if (!cancelled) setState((s) => ({ ...s, loading: false, error: "Couldn't load wind data" }));
+      }
+    }
+    load();
+    const id = setInterval(load, 10 * 60 * 1000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [lat, lon, unit]);
+  return state;
+}
+
+/* compass-rose dial: rotates the whole face (N/E/S/W ticks + wind arrow together) by
+   -deviceHeading so it stays locked to the real world as the phone turns, the same way a
+   physical compass does — a fixed triangle at the top marks "the way your phone is pointing."
+   The arrow is drawn pointing DOWNWIND (the direction the wind is blowing TOWARD, wind-sock/
+   flag style — how golfers already read wind on a course) rather than the meteorological
+   "from" direction used in the text label next to it. */
+function WindDial({ windDirection, heading, hasCompass, size }) {
+  const r = size / 2;
+  const toward = windDirection != null ? (windDirection + 180) % 360 : null;
+  const roseRotation = hasCompass ? -heading : 0;
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ flexShrink: 0 }}>
+      <g style={{ transform: `rotate(${roseRotation}deg)`, transformOrigin: `${r}px ${r}px`, transition: "transform 0.15s linear" }}>
+        <circle cx={r} cy={r} r={r - 2} fill={C.white} stroke={C.fairway} strokeWidth={1.5} />
+        {[["N", 0], ["E", 90], ["S", 180], ["W", 270]].map(([label, deg]) => {
+          const rad = (deg * Math.PI) / 180;
+          const lx = r + Math.sin(rad) * (r - 11);
+          const ly = r - Math.cos(rad) * (r - 11);
+          return (
+            <text key={label} x={lx} y={ly} textAnchor="middle" dominantBaseline="middle" fontSize={9} fontWeight={700} fill={C.turf} fontFamily={sans}>
+              {label}
+            </text>
+          );
+        })}
+        {toward != null && (
+          <g style={{ transform: `rotate(${toward}deg)`, transformOrigin: `${r}px ${r}px` }}>
+            <line x1={r} y1={r} x2={r} y2={r * 0.32} stroke={C.flag} strokeWidth={2.5} strokeLinecap="round" />
+            <polygon points={`${r - 5},${r * 0.32 + 6} ${r + 5},${r * 0.32 + 6} ${r},${r * 0.32 - 5}`} fill={C.flag} />
+          </g>
+        )}
+        <circle cx={r} cy={r} r={2.5} fill={C.fairway} />
+      </g>
+      <polygon points={`${r - 4},3 ${r + 4},3 ${r},10`} fill={C.ink} />
+    </svg>
+  );
+}
+
+/* the wind panel shown above the scorecard while actively scoring — dial + speed/gust text +,
+   on iOS only, a one-tap "enable compass" prompt (see useCompassHeading). Renders nothing when
+   there's no location to look wind up for, or the lookup hasn't returned anything yet, rather
+   than cluttering the scoring screen with a loading/error state for an optional feature. */
+function WindIndicator({ wind, compass, unit }) {
+  if (wind.speed == null) return null;
+  const unitLabel = unit === "kmh" ? "km/h" : "mph";
+  const hasCompass = compass.heading != null;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 12, border: `1px solid ${C.line}`, borderRadius: 8, padding: "8px 12px", marginBottom: 10, background: C.white }}>
+      <WindDial windDirection={wind.direction} heading={compass.heading || 0} hasCompass={hasCompass} size={60} />
+      <div style={{ flex: 1, minWidth: 0, fontFamily: sans }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: C.ink }}>
+          {Math.round(wind.speed)} {unitLabel}
+          {wind.direction != null && <span style={{ color: C.turf, fontWeight: 400 }}> from {compassPointFromDegrees(wind.direction)}</span>}
+        </div>
+        {wind.gust != null && (
+          <div style={{ fontSize: 12, color: C.flag, fontWeight: 600 }}>Gusts to {Math.round(wind.gust)} {unitLabel}</div>
+        )}
+        {compass.permission === "prompt" && (
+          <button style={{ ...btnGhost, fontSize: 10, padding: "3px 7px", marginTop: 4 }} onClick={compass.requestPermission}>🧭 Enable live compass</button>
+        )}
+        {compass.permission === "denied" && (
+          <div style={{ fontSize: 10, color: C.turf, marginTop: 3 }}>Compass permission denied — arrow shown relative to true north.</div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 /* how much real data a parsed hole carries — used to pick a winner when the same hole number
@@ -1777,6 +1935,16 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
   const livePos = useLivePosition(step === "scoring");
   const mePlayer = players.find((p) => p.id === mePlayerId);
 
+  /* wind indicator: prefer the course's own stored coordinates (stable — doesn't refetch as
+     the golfer walks the course); if the course has none, lock onto the first GPS fix of the
+     round instead of re-resolving on every position update (wind doesn't need to track you
+     hole to hole, and refetching on every GPS tick would hammer the API for no benefit). */
+  const firstLivePosRef = useRef(null);
+  useEffect(() => { if (!firstLivePosRef.current && livePos) firstLivePosRef.current = livePos; }, [livePos]);
+  const windPos = course?.lat != null && course?.lon != null ? { lat: course.lat, lon: course.lon } : firstLivePosRef.current;
+  const wind = useWindData(windPos?.lat, windPos?.lon, distanceUnit === "m" ? "kmh" : "mph");
+  const compass = useCompassHeading(step === "scoring");
+
   /* per-hole scoring view (both formats): holes reordered to start from the chosen tee, one
      hole "active" (fully visible) at a time; holes before activeIdx have been stepped past and
      render collapsed */
@@ -2380,6 +2548,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
             <button onClick={() => setResumedNotice(false)} style={{ background: "transparent", border: "none", color: C.fairway, cursor: "pointer", fontSize: 14 }}>×</button>
           </div>
         )}
+        <WindIndicator wind={wind} compass={compass} unit={distanceUnit === "m" ? "kmh" : "mph"} />
         <div style={{ border: `1px solid ${C.line}`, borderRadius: 8, overflow: "hidden" }}>
           {selected.length > 0 && (
             <div style={{ display: "flex", alignItems: "center", padding: "6px 10px", background: C.fairway, fontFamily: sans, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.03em" }}>
@@ -2560,6 +2729,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
           <button onClick={() => setResumedNotice(false)} style={{ background: "transparent", border: "none", color: C.fairway, cursor: "pointer", fontSize: 14 }}>×</button>
         </div>
       )}
+      <WindIndicator wind={wind} compass={compass} unit={distanceUnit === "m" ? "kmh" : "mph"} />
       <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, marginBottom: 14 }}>
         {solo ? (
           <>Score ({pA1?.name} & {pB1?.name}): <b style={{ color: C.team1 }}>{t1Total}</b></>
