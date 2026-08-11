@@ -106,26 +106,62 @@ function useLivePosition(active) {
      'deviceorientationabsolute' event (or a plain 'deviceorientation' event with `absolute:
      true`) carries `alpha`, which increases counter-clockwise from the device's start position;
      converting to a compass bearing is `(360 - alpha) % 360`.
+   **Fixed 11 Aug — real-device bug**: this originally only accepted `alpha` when the event was
+   genuinely flagged absolute (`e.absolute === true` or a 'deviceorientationabsolute' event). A
+   large, well-documented chunk of Android/Chrome devices — across many manufacturers, not one
+   specific model — never fire a properly-flagged absolute event at all, even though the plain
+   'deviceorientation' event's `alpha` is, in practice, still magnetometer-referenced on those
+   devices. The strict check silently discarded every event on those devices, so `heading` never
+   left `null` and the dial never rotated — indistinguishable, from the user's side, from the
+   compass being broken. Now falls back to trusting plain (non-absolute) `alpha` values *until* a
+   genuinely-absolute event shows up, at which point it switches over to the more trustworthy
+   source and stops trusting the relative one.
    Known limitation: this doesn't compensate for screen rotation (landscape use) — fine for a
    golf app used portrait-in-hand, but heading would read off by 90°/180° in landscape. */
 function useCompassHeading(active) {
   const [heading, setHeading] = useState(null);
+  const [signal, setSignal] = useState("waiting"); // "waiting" | "receiving" | "stalled" — "stalled" surfaces a hint that no orientation events arrived at all (a different, deeper problem than the absolute-flag bug above)
   const needsIOSPermission = typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function";
   const [permission, setPermission] = useState(needsIOSPermission ? "prompt" : "granted");
+  const gotAbsoluteRef = useRef(false);
+  const gotAnyEventRef = useRef(false);
 
   useEffect(() => {
     if (!active || permission !== "granted" || typeof window === "undefined") return;
+    gotAbsoluteRef.current = false;
+    gotAnyEventRef.current = false;
+    setSignal("waiting");
     function handle(e) {
       let h = null;
-      if (e.webkitCompassHeading != null) h = e.webkitCompassHeading;
-      else if (e.alpha != null && (e.absolute || e.type === "deviceorientationabsolute")) h = (360 - e.alpha) % 360;
-      if (h != null && !Number.isNaN(h)) setHeading(h);
+      if (e.webkitCompassHeading != null) {
+        h = e.webkitCompassHeading;
+      } else if (e.alpha != null) {
+        const isAbsoluteEvent = e.absolute === true || e.type === "deviceorientationabsolute";
+        if (isAbsoluteEvent) {
+          gotAbsoluteRef.current = true;
+          h = (360 - e.alpha) % 360;
+        } else if (!gotAbsoluteRef.current) {
+          // fallback for devices that never send a genuinely-absolute event — see comment above
+          h = (360 - e.alpha) % 360;
+        }
+      }
+      // only counts as "signal" once we actually have a usable heading — some browsers (notably
+      // headless/synthetic test environments, but plausibly some real ones too) fire an initial
+      // orientation event with no alpha at all just to announce the API exists, which shouldn't
+      // count as "the compass is working"
+      if (h != null && !Number.isNaN(h)) {
+        gotAnyEventRef.current = true;
+        setSignal("receiving");
+        setHeading(h);
+      }
     }
     window.addEventListener("deviceorientationabsolute", handle, true);
     window.addEventListener("deviceorientation", handle, true);
+    const stalledTimer = setTimeout(() => { if (!gotAnyEventRef.current) setSignal("stalled"); }, 5000);
     return () => {
       window.removeEventListener("deviceorientationabsolute", handle, true);
       window.removeEventListener("deviceorientation", handle, true);
+      clearTimeout(stalledTimer);
     };
   }, [active, permission]);
 
@@ -139,7 +175,7 @@ function useCompassHeading(active) {
     }
   }, [needsIOSPermission]);
 
-  return { heading, permission, needsIOSPermission, requestPermission };
+  return { heading, permission, needsIOSPermission, requestPermission, signal };
 }
 
 /* ---------- golf bag / club suggestion / voice caddy ---------- */
@@ -559,6 +595,9 @@ function WindIndicator({ wind, compass, unit }) {
         )}
         {compass.permission === "denied" && (
           <div style={{ fontSize: 10, color: C.turf, marginTop: 3 }}>Compass permission denied — arrow shown relative to true north.</div>
+        )}
+        {compass.permission === "granted" && compass.signal === "stalled" && (
+          <div style={{ fontSize: 10, color: C.turf, marginTop: 3 }}>No compass signal from this browser/device — dial won't rotate as you turn.</div>
         )}
       </div>
     </div>
@@ -2842,6 +2881,18 @@ function RoundDetailStroke({ round, players, courseHoles, distanceUnit }) {
               {stats.fir != null && <> · FIR <b>{stats.fir}%</b> ({stats.firHit}/{stats.firAttempts})</>}
               {stats.gir != null && <> · GIR <b>{stats.gir}%</b> ({stats.girHit}/{stats.girAttempts})</>}
             </div>
+            {stats.firAttempts > 0 && (
+              /* plain-text fallback for the Fairway/Left/Right breakdown below, always
+                 rendered regardless of whether the recharts pie chart renders correctly on
+                 this device/browser — some real-device/mobile-browser combinations can fail
+                 to size a freshly-mounted ResponsiveContainer correctly, which would silently
+                 hide this data if it only lived in the chart */
+              <div style={{ fontFamily: sans, fontSize: 12, color: C.ink, marginTop: 4 }}>
+                Tee shots: <b style={{ color: C.turf }}>Fairway {stats.shapeCounts.fairway || 0}</b>
+                {" · "}<b style={{ color: C.flag }}>Left {stats.shapeCounts.left || 0}</b>
+                {" · "}<b style={{ color: C.brass }}>Right {stats.shapeCounts.right || 0}</b>
+              </div>
+            )}
             {pieData.length > 0 && (
               <div style={{ width: "100%", height: 190, marginTop: 6 }}>
                 <ResponsiveContainer>
@@ -2903,7 +2954,17 @@ function RoundDetailBetterBall({ round, players, distanceUnit }) {
                             return <ShotChip key={ri} label={label} colorKey={shape} />;
                           })}
                         </td>
-                        <td style={tdStyle}>{putts ?? "—"}</td>
+                        <td style={tdStyle}>
+                          {putts ?? "—"}
+                          {detail?.puttMode === "better" && (
+                            <div style={{ fontSize: 10, fontFamily: sans, color: C.turf, fontWeight: 700, whiteSpace: "nowrap" }}>better ball</div>
+                          )}
+                          {detail?.puttMode === "own" && (
+                            <div style={{ fontSize: 10, fontFamily: sans, color: C.turf, fontWeight: 700, whiteSpace: "nowrap" }}>
+                              own: {pA?.name || "A"} {detail.ownPutts?.A ?? "—"} · {pB?.name || "B"} {detail.ownPutts?.B ?? "—"}
+                            </div>
+                          )}
+                        </td>
                         <td style={tdStyle}>{team.holeScores[hn] ?? "—"}</td>
                       </tr>
                     );
