@@ -984,29 +984,78 @@ function MicIcon({ size = 18, color }) {
    caddy wake-word name shown below it, rather than emoji + "Voice caddy"/"Listening…" text —
    and sized to match the wind panel's height exactly (both are stretched to the same row
    height by the flex row that renders them side by side — see the `alignItems: "stretch"`
-   wrapper in PlayTab — with `height: "100%"` here to actually fill that stretched space). */
-function VoiceCaddyButton({ voiceOn, setVoiceOn, voiceMsg, mePlayer, wakeWord }) {
+   wrapper in PlayTab — with `flex: 1` on the button itself to actually fill that stretched
+   space).
+   Recognizer errors (voiceError — mic blocked, Brave's broken backend, etc.) get a second
+   redesign, also 13 Aug: rather than always-visible inline text (which competed for the same
+   small footprint as the wind panel), the button greys out (CSS grayscale + reduced opacity)
+   with a small yellow/black warning badge, and tapping it while in that state opens a popup
+   with the actual error text instead of toggling voice caddy on/off. The badge lives in an
+   unfiltered sibling wrapper (not inside the grayscale'd button) so it stays full-color. */
+function VoiceCaddyButton({ voiceOn, setVoiceOn, voiceMsg, voiceError, mePlayer, wakeWord }) {
   const supported = voiceSupported();
   const name = (wakeWord || "").trim() || "Gaddy";
+  const [showErrorPopup, setShowErrorPopup] = useState(false);
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0 }}>
-      <button
-        title={!supported ? "Voice control needs a browser with speech recognition (Chrome works best)" : !mePlayer ? "Mark a player as ⭐ you in the Players tab first" : voiceOn ? `Listening for "Hey ${name}, I'm using a..." or "Hey ${name}, record shot"` : "Turn on voice caddy"}
-        disabled={!supported}
-        onClick={() => setVoiceOn(!voiceOn)}
-        style={{
-          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3,
-          flex: 1, minWidth: 58, border: `1px solid ${voiceOn ? C.flag : C.line}`, borderRadius: 8,
-          background: voiceOn ? C.flag : C.white, padding: "0 10px", boxSizing: "border-box",
-          opacity: supported ? 1 : 0.5, cursor: supported ? "pointer" : "not-allowed",
-        }}
-      >
-        <MicIcon size={18} color={voiceOn ? C.white : C.fairway} />
-        <span style={{ fontFamily: sans, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em", color: voiceOn ? C.white : C.turf, whiteSpace: "nowrap" }}>
-          {name}
-        </span>
-      </button>
-      {voiceOn && voiceMsg && <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, maxWidth: 150, textAlign: "center", marginTop: 3 }}>{voiceMsg}</div>}
+      <div style={{ position: "relative", display: "flex", flexDirection: "column", flex: 1, width: "100%" }}>
+        <button
+          title={
+            voiceError ? "Voice caddy trouble — tap for details"
+            : !supported ? "Voice control needs a browser with speech recognition (Chrome works best)"
+            : !mePlayer ? "Mark a player as ⭐ you in the Players tab first"
+            : voiceOn ? `Listening for "Hey ${name}, I'm using a..." or "Hey ${name}, record shot"`
+            : "Turn on voice caddy"
+          }
+          disabled={!supported}
+          onClick={() => { if (voiceError) setShowErrorPopup(true); else setVoiceOn(!voiceOn); }}
+          style={{
+            display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3,
+            flex: 1, minWidth: 58, border: `1px solid ${voiceOn ? C.flag : C.line}`, borderRadius: 8,
+            background: voiceOn ? C.flag : C.white, padding: "0 10px", boxSizing: "border-box",
+            opacity: supported ? 1 : 0.5, cursor: supported ? "pointer" : "not-allowed",
+            filter: voiceError ? "grayscale(1)" : "none",
+          }}
+        >
+          <MicIcon size={18} color={voiceOn ? C.white : C.fairway} />
+          <span style={{ fontFamily: sans, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em", color: voiceOn ? C.white : C.turf, whiteSpace: "nowrap" }}>
+            {name}
+          </span>
+        </button>
+        {voiceError && (
+          <div
+            aria-hidden="true"
+            style={{
+              position: "absolute", top: -6, right: -6, width: 17, height: 17, borderRadius: "50%",
+              background: "#F2C230", color: "#1A1A14", border: "1.5px solid " + C.white,
+              fontFamily: sans, fontSize: 11, fontWeight: 900, lineHeight: "1",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              boxShadow: "0 1px 3px rgba(0,0,0,0.35)", pointerEvents: "none",
+            }}
+          >
+            !
+          </div>
+        )}
+      </div>
+      {voiceOn && voiceMsg && !voiceError && <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, maxWidth: 150, textAlign: "center", marginTop: 3 }}>{voiceMsg}</div>}
+      {showErrorPopup && voiceError && (
+        <div
+          onClick={() => setShowErrorPopup(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(20,20,16,0.55)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 14 }}
+        >
+          <div onClick={(e) => e.stopPropagation()} style={{ background: C.paper, borderRadius: 10, padding: 18, width: "100%", maxWidth: 340, boxSizing: "border-box" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+              <div style={{ width: 22, height: 22, borderRadius: "50%", background: "#F2C230", color: "#1A1A14", fontFamily: sans, fontSize: 13, fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>!</div>
+              <div style={{ fontFamily: serif, fontSize: 16, color: C.fairway }}>Voice caddy trouble</div>
+            </div>
+            <div style={{ fontFamily: sans, fontSize: 13, color: C.ink, lineHeight: 1.5, marginBottom: 16 }}>{voiceError}</div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button style={btnGhost} onClick={() => { setVoiceOn(false); setShowErrorPopup(false); }}>Turn off voice caddy</button>
+              <button style={btnPrimary} onClick={() => setShowErrorPopup(false)}>Dismiss</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2115,7 +2164,18 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
   const [driveModal, setDriveModal] = useState(null);
   const [voiceOn, setVoiceOn] = useState(false);
   const [voiceMsg, setVoiceMsg] = useState("");
+  /* recognizer-level errors (mic blocked, Brave's broken backend, etc.) are tracked separately
+     from voiceMsg — per the user's 13 Aug request, these no longer show as inline text under
+     the button; instead the button greys out with a warning badge and this text surfaces in a
+     tap-to-open popup (see VoiceCaddyButton) instead of always-visible text competing for the
+     same small footprint as the wind panel next to it. */
+  const [voiceError, setVoiceError] = useState("");
   const [resumedNotice, setResumedNotice] = useState(!!savedRound);
+
+  /* clear a stale error as soon as voice caddy is turned off (manually, or via the error
+     popup's "Turn off" button) — next time it's turned on it starts clean rather than showing
+     a greyed-out/badged button before a new error has actually happened. */
+  useEffect(() => { if (!voiceOn) setVoiceError(""); }, [voiceOn]);
 
   const course = courses.find((c) => c.id === courseId);
   const livePos = useLivePosition(step === "scoring");
@@ -2345,12 +2405,20 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
   const handleVoiceCommand = useCallback((kind, payload, transcript) => {
     if (kind === "error") {
       // no spoken reply — if speech recognition itself is broken, speaking to the user via the
-      // same broken pipeline's assumptions isn't reliable, and a silent visible message is safer
+      // same broken pipeline's assumptions isn't reliable, and a silent visible message is safer.
+      // Surfaced via voiceError (greyed-out button + warning badge + tap-to-open popup — see
+      // VoiceCaddyButton), not the inline voiceMsg line other commands use below.
       const known = { network: "couldn't reach the speech recognition service", "not-allowed": "microphone access was blocked", "service-not-allowed": "speech recognition isn't allowed here", "audio-capture": "no microphone was found" };
       const why = known[payload] || `error: ${payload}`;
-      setVoiceMsg(`Voice caddy stopped hearing anything (${why}). Some browsers — Brave is the known one — start the mic but don't actually run speech recognition. Try Chrome if this keeps happening.`);
+      setVoiceError(`Voice caddy stopped hearing anything (${why}). Some browsers — Brave is the known one — start the mic but don't actually run speech recognition. Try Chrome if this keeps happening.`);
       return;
     }
+    // reaching here means the recognizer just produced a real transcript, proof it's actually
+    // working again — clear any stale error state from an earlier failed attempt. (Unconditional
+    // rather than reading voiceError first: this callback is memoized with an empty deps array,
+    // so a closed-over voiceError value would always be stale; setVoiceError("") when it's
+    // already "" is a harmless no-op re-render.)
+    setVoiceError("");
     const me = mePlayerIdRef.current;
     if (!me) { setVoiceMsg("Mark a player as ⭐ you in the Players tab first."); speak("Mark a player as you first."); return; }
     // both formats now use the same per-hole view — voice/auto-detect always target whichever
@@ -2754,7 +2822,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
           <div style={{ flex: 1, minWidth: 0 }}>
             <WindIndicator wind={wind} compass={compass} unit={distanceUnit === "m" ? "kmh" : "mph"} />
           </div>
-          <VoiceCaddyButton voiceOn={voiceOn} setVoiceOn={setVoiceOn} voiceMsg={voiceMsg} mePlayer={mePlayer} wakeWord={voiceWakeWord} />
+          <VoiceCaddyButton voiceOn={voiceOn} setVoiceOn={setVoiceOn} voiceMsg={voiceMsg} voiceError={voiceError} mePlayer={mePlayer} wakeWord={voiceWakeWord} />
         </div>
         <div style={{ border: `1px solid ${C.line}`, borderRadius: 8, overflow: "hidden" }}>
           {selected.length > 0 && (
@@ -2935,7 +3003,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
         <div style={{ flex: 1, minWidth: 0 }}>
           <WindIndicator wind={wind} compass={compass} unit={distanceUnit === "m" ? "kmh" : "mph"} />
         </div>
-        <VoiceCaddyButton voiceOn={voiceOn} setVoiceOn={setVoiceOn} voiceMsg={voiceMsg} mePlayer={mePlayer} wakeWord={voiceWakeWord} />
+        <VoiceCaddyButton voiceOn={voiceOn} setVoiceOn={setVoiceOn} voiceMsg={voiceMsg} voiceError={voiceError} mePlayer={mePlayer} wakeWord={voiceWakeWord} />
       </div>
       <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, marginBottom: 14 }}>
         {solo ? (
