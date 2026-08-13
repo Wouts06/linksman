@@ -607,7 +607,7 @@ function WindIndicator({ wind, compass, unit }) {
   const unitLabel = unit === "kmh" ? "km/h" : "mph";
   const hasCompass = compass.heading != null;
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 12, border: `1px solid ${C.line}`, borderRadius: 8, padding: "8px 12px", marginBottom: 10, background: C.white }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 12, border: `1px solid ${C.line}`, borderRadius: 8, padding: "8px 12px", background: C.white, width: "100%", boxSizing: "border-box" }}>
       <WindDial windDirection={wind.direction} heading={compass.heading || 0} hasCompass={hasCompass} size={60} />
       <div style={{ flex: 1, minWidth: 0, fontFamily: sans }}>
         <div style={{ fontSize: 15, fontWeight: 700, color: C.ink }}>
@@ -994,6 +994,60 @@ function Tab({ label, active, onClick }) {
   );
 }
 
+/* dropdown shown from the ribbon's hamburger button while a round is being actively scored
+   (compact header mode — see App()). Holds the same Play/Courses/Players/History navigation
+   the full-width tab row normally shows, plus — separated by a divider, its own slot — a
+   "Back to setup" action wired to the in-progress round's abandonRound(). A transparent
+   full-viewport backdrop behind the panel closes it on an outside tap. */
+function NavMenu({ tab, setTab, onClose, activeRound }) {
+  const items = [
+    { key: "play", label: "Play" },
+    { key: "courses", label: "Courses" },
+    { key: "players", label: "Players" },
+    { key: "history", label: "History" },
+  ];
+  return (
+    <>
+      <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 40, background: "transparent" }} />
+      <div
+        style={{
+          position: "absolute", top: "100%", left: 14, right: 14, zIndex: 50, marginTop: 6,
+          background: C.white, border: `1px solid ${C.line}`, borderRadius: 8,
+          boxShadow: "0 8px 24px rgba(0,0,0,0.3)", overflow: "hidden",
+        }}
+      >
+        {items.map((it) => (
+          <button
+            key={it.key}
+            onClick={() => { setTab(it.key); onClose(); }}
+            style={{
+              display: "block", width: "100%", textAlign: "left", padding: "12px 16px",
+              background: tab === it.key ? C.paper2 : "transparent", border: "none",
+              borderBottom: `1px solid ${C.line}`, fontFamily: serif, fontSize: 14,
+              textTransform: "uppercase", letterSpacing: "0.02em", cursor: "pointer",
+              color: tab === it.key ? C.fairway : C.ink,
+            }}
+          >
+            {it.label}
+          </button>
+        ))}
+        {activeRound && (
+          <button
+            onClick={() => { activeRound.onBack(); onClose(); }}
+            style={{
+              display: "block", width: "100%", textAlign: "left", padding: "12px 16px",
+              background: "transparent", border: "none", borderTop: `2px solid ${C.line}`,
+              fontFamily: sans, fontSize: 13, fontWeight: 600, color: C.flag, cursor: "pointer",
+            }}
+          >
+            ← Back to setup
+          </button>
+        )}
+      </div>
+    </>
+  );
+}
+
 function Field({ label, children }) {
   return (
     <label style={{ display: "block", marginBottom: 12 }}>
@@ -1032,15 +1086,24 @@ const btnGhost = {
   background: "transparent", color: C.fairway, border: `1px solid ${C.fairway}`, borderRadius: 6,
   padding: "10px 16px", fontFamily: sans, fontSize: 14, fontWeight: 600, cursor: "pointer",
 };
-/* used for the small action buttons that sit side-by-side in a scoring-screen header (Voice
-   caddy, Back to setup) — an explicit height + flex-centering, rather than padding alone,
-   because a button containing an emoji (🎙️) can render 3-4px taller than a plain-text button
-   at the "same" padding: color-emoji glyphs pull in a different font whose line metrics don't
-   match the surrounding sans-serif text, inflating the line box. Fixing the box height directly
+/* used for small action buttons (currently just Voice caddy, nested next to the wind panel
+   during scoring) — an explicit height + flex-centering, rather than padding alone, because a
+   button containing an emoji (🎙️) can render 3-4px taller than a plain-text button at the
+   "same" padding: color-emoji glyphs pull in a different font whose line metrics don't match
+   the surrounding sans-serif text, inflating the line box. Fixing the box height directly
    sidesteps that regardless of glyph metrics. */
 const headerActionBtnStyle = {
   ...btnGhost, fontSize: 12, height: 36, lineHeight: "20px", boxSizing: "border-box",
   display: "inline-flex", alignItems: "center", justifyContent: "center", whiteSpace: "nowrap",
+};
+/* the top green ribbon's menu toggle — only rendered while a round is actively being scored
+   (see App()'s `compact` state), replacing the full Play/Courses/Players/History tab row to
+   free up vertical space on the scoring screen. Sized/faded via inline transition so it visibly
+   "grows in" as the tab row collapses, rather than just popping in. */
+const hamburgerBtnStyle = {
+  height: 34, borderRadius: 6, border: "1px solid rgba(251,249,242,0.35)",
+  background: "rgba(251,249,242,0.12)", color: C.white, fontSize: 16, cursor: "pointer",
+  display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0, padding: 0,
 };
 const btnDanger = {
   background: "transparent", color: C.flag, border: `1px solid ${C.flag}`, borderRadius: 6,
@@ -1988,7 +2051,7 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
 }
 
 /* ================= PLAY TAB ================= */
-function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit, mePlayerId, voiceWakeWord }) {
+function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit, mePlayerId, voiceWakeWord, onActiveRoundChange }) {
   /* resume an in-progress round after an accidental tab/app close — read once at mount */
   const [savedRound] = useState(() => loadKey(ACTIVE_ROUND_KEY, null));
   const [step, setStep] = useState(savedRound ? "scoring" : "setup");
@@ -2045,6 +2108,22 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
     if (step !== "scoring") return;
     saveKey(ACTIVE_ROUND_KEY, { format, courseId, selected, overrides, scores, teamAssign, bbState, startHole, activeIdx });
   }, [step, format, courseId, selected, overrides, scores, teamAssign, bbState, startHole, activeIdx]);
+
+  /* tells App() whether a round is actively being scored right now, plus enough to render the
+     ribbon's compact header (course name / format) and let its hamburger menu's "Back to
+     setup" item reach this round's abandonRound() — see the ribbon-collapse feature in App(). */
+  useEffect(() => {
+    if (step === "scoring" && course) {
+      onActiveRoundChange({
+        courseName: course.name,
+        formatLabel: format === "betterball" ? "Better Ball" : "Stroke Play",
+        onBack: abandonRound,
+      });
+    } else {
+      onActiveRoundChange(null);
+    }
+    return () => onActiveRoundChange(null);
+  }, [step, course, format]);
 
   function togglePlayer(id) {
     if (selected.includes(id)) {
@@ -2610,20 +2689,22 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
 
     return (
       <div>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10, gap: 8, flexWrap: "wrap" }}>
-          <div style={{ fontFamily: serif, fontSize: 19, color: C.fairway }}>{course.name}</div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <VoiceCaddyButton voiceOn={voiceOn} setVoiceOn={setVoiceOn} voiceMsg={voiceMsg} mePlayer={mePlayer} wakeWord={voiceWakeWord} />
-            <button style={headerActionBtnStyle} onClick={abandonRound}>← Back to setup</button>
-          </div>
-        </div>
         {resumedNotice && (
           <div style={{ background: C.paper2, border: `1px solid ${C.brass}`, borderRadius: 6, padding: "8px 12px", fontFamily: sans, fontSize: 12, color: C.fairway, marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span>Resumed your in-progress round.</span>
             <button onClick={() => setResumedNotice(false)} style={{ background: "transparent", border: "none", color: C.fairway, cursor: "pointer", fontSize: 14 }}>×</button>
           </div>
         )}
-        <WindIndicator wind={wind} compass={compass} unit={distanceUnit === "m" ? "kmh" : "mph"} />
+        {/* course name/round type now live in the ribbon's compact header (see App()); Voice
+            caddy nests next to the wind panel here instead of sitting in a local heading row,
+            and Back to setup lives in the ribbon's hamburger menu — both freeing up vertical
+            space on the scoring screen, per the "more room while scoring" request. */}
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 10 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <WindIndicator wind={wind} compass={compass} unit={distanceUnit === "m" ? "kmh" : "mph"} />
+          </div>
+          <VoiceCaddyButton voiceOn={voiceOn} setVoiceOn={setVoiceOn} voiceMsg={voiceMsg} mePlayer={mePlayer} wakeWord={voiceWakeWord} />
+        </div>
         <div style={{ border: `1px solid ${C.line}`, borderRadius: 8, overflow: "hidden" }}>
           {selected.length > 0 && (
             <div style={{ display: "flex", alignItems: "center", padding: "6px 10px", background: C.fairway, fontFamily: sans, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.03em" }}>
@@ -2791,20 +2872,19 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4, gap: 8, flexWrap: "wrap" }}>
-        <div style={{ fontFamily: serif, fontSize: 19, color: C.fairway }}>{course.name} — Better Ball</div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <VoiceCaddyButton voiceOn={voiceOn} setVoiceOn={setVoiceOn} voiceMsg={voiceMsg} mePlayer={mePlayer} wakeWord={voiceWakeWord} />
-          <button style={headerActionBtnStyle} onClick={abandonRound}>← Back to setup</button>
-        </div>
-      </div>
       {resumedNotice && (
         <div style={{ background: C.paper2, border: `1px solid ${C.brass}`, borderRadius: 6, padding: "8px 12px", fontFamily: sans, fontSize: 12, color: C.fairway, marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <span>Resumed your in-progress round.</span>
           <button onClick={() => setResumedNotice(false)} style={{ background: "transparent", border: "none", color: C.fairway, cursor: "pointer", fontSize: 14 }}>×</button>
         </div>
       )}
-      <WindIndicator wind={wind} compass={compass} unit={distanceUnit === "m" ? "kmh" : "mph"} />
+      {/* see the matching comment in the stroke-play branch above — same ribbon-header move */}
+      <div style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 10 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <WindIndicator wind={wind} compass={compass} unit={distanceUnit === "m" ? "kmh" : "mph"} />
+        </div>
+        <VoiceCaddyButton voiceOn={voiceOn} setVoiceOn={setVoiceOn} voiceMsg={voiceMsg} mePlayer={mePlayer} wakeWord={voiceWakeWord} />
+      </div>
       <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, marginBottom: 14 }}>
         {solo ? (
           <>Score ({pA1?.name} & {pB1?.name}): <b style={{ color: C.team1 }}>{t1Total}</b></>
@@ -3068,6 +3148,14 @@ export default function App() {
   const [distanceUnit, setDistanceUnitState] = useState("yd");
   const [voiceWakeWord, setVoiceWakeWordState] = useState("");
   const [mePlayerId, setMePlayerIdState] = useState(null);
+  /* null when no round is being actively scored; otherwise { courseName, formatLabel, onBack }
+     reported up by PlayTab (see its onActiveRoundChange effect) — drives the ribbon's compact
+     "hamburger" header below, only while the Play tab is actually showing the scoring screen */
+  const [activeRound, setActiveRound] = useState(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const compact = tab === "play" && !!activeRound;
+
+  useEffect(() => { if (!compact) setMenuOpen(false); }, [compact]);
 
   useEffect(() => {
     setCoursesState(loadKey("golf:courses", []));
@@ -3112,9 +3200,41 @@ export default function App() {
 
   return (
     <div style={{ minHeight: "100vh", background: C.paper, fontFamily: sans }}>
-      <div style={{ background: C.fairway, padding: "16px 14px 0" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12, gap: 8 }}>
-          <div style={{ fontFamily: serif, fontSize: 22, color: C.white }}>Linksman</div>
+      <div style={{ background: C.fairway, padding: "16px 14px 0", position: "relative" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+            {/* hamburger: hidden/collapsed (width+opacity animated to 0) outside compact mode,
+                rather than unmounted, so it visibly grows in as the tab row collapses below */}
+            <button
+              onClick={() => setMenuOpen((o) => !o)}
+              aria-label="Menu"
+              aria-expanded={menuOpen}
+              style={{
+                ...hamburgerBtnStyle,
+                width: compact ? 34 : 0,
+                opacity: compact ? 1 : 0,
+                border: compact ? hamburgerBtnStyle.border : "none",
+                transform: compact ? "scale(1)" : "scale(0.4)",
+                pointerEvents: compact ? "auto" : "none",
+                transition: "width 0.25s ease, opacity 0.2s ease, transform 0.25s ease",
+                overflow: "hidden",
+              }}
+            >
+              ☰
+            </button>
+            {compact ? (
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontFamily: serif, fontSize: 16, color: C.white, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {activeRound.courseName}
+                </div>
+                <div style={{ fontFamily: sans, fontSize: 10, color: "rgba(251,249,242,0.7)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                  {activeRound.formatLabel}
+                </div>
+              </div>
+            ) : (
+              <div style={{ fontFamily: serif, fontSize: 22, color: C.white }}>Linksman</div>
+            )}
+          </div>
           <div style={{ display: "flex", gap: 2, background: "rgba(251,249,242,0.12)", borderRadius: 5, padding: 2, flexShrink: 0 }}>
             {["yd", "m"].map((u) => (
               <button key={u} onClick={() => setDistanceUnit(u)}
@@ -3128,15 +3248,21 @@ export default function App() {
             ))}
           </div>
         </div>
-        <div style={{ display: "flex" }}>
+        {/* full tab row collapses to zero height/opacity in compact mode instead of the
+            hamburger appearing alongside it — the two visually swap places, "zooming" into
+            the hamburger as requested */}
+        <div style={{ display: "flex", maxHeight: compact ? 0 : 60, opacity: compact ? 0 : 1, overflow: "hidden", transition: "max-height 0.28s ease, opacity 0.2s ease" }}>
           <Tab label="Play" active={tab === "play"} onClick={() => setTab("play")} />
           <Tab label="Courses" active={tab === "courses"} onClick={() => setTab("courses")} />
           <Tab label="Players" active={tab === "players"} onClick={() => setTab("players")} />
           <Tab label="History" active={tab === "history"} onClick={() => setTab("history")} />
         </div>
+        {menuOpen && compact && (
+          <NavMenu tab={tab} setTab={setTab} onClose={() => setMenuOpen(false)} activeRound={activeRound} />
+        )}
       </div>
       <div style={{ maxWidth: 960, margin: "0 auto", padding: "22px 20px 60px" }}>
-        {tab === "play" && <PlayTab courses={courses} players={players} setPlayers={setPlayers} rounds={rounds} setRounds={setRounds} distanceUnit={distanceUnit} mePlayerId={mePlayerId} voiceWakeWord={voiceWakeWord} />}
+        {tab === "play" && <PlayTab courses={courses} players={players} setPlayers={setPlayers} rounds={rounds} setRounds={setRounds} distanceUnit={distanceUnit} mePlayerId={mePlayerId} voiceWakeWord={voiceWakeWord} onActiveRoundChange={setActiveRound} />}
         {tab === "courses" && <CoursesTab courses={courses} setCourses={setCourses} location={location} requestLocation={requestLocation} distanceUnit={distanceUnit} />}
         {tab === "players" && <PlayersTab players={players} setPlayers={setPlayers} distanceUnit={distanceUnit} mePlayerId={mePlayerId} setMePlayerId={setMePlayerId} voiceWakeWord={voiceWakeWord} setVoiceWakeWord={setVoiceWakeWord} />}
         {tab === "history" && <HistoryTab rounds={rounds} players={players} courses={courses} distanceUnit={distanceUnit} />}
