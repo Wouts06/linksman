@@ -787,6 +787,60 @@ function parTotal(course) {
   return course.holes.reduce((s, h) => s + (Number(h.par) || 0), 0);
 }
 
+/* ---- tee boxes (added 13 Aug, at the user's request) ----
+   Different colored tee boxes play different yardages (and carry their own course
+   rating/slope) on the same course — this lets each player in a round pick which tees they're
+   playing, rather than the whole group being locked to one shared yardage table.
+
+   Standard 5-color preset list, per the user's choice — a course's `tees` array picks from
+   these names but stores its own color/rating/slope/per-hole yardage, so this is just the
+   dropdown's option list, not a fixed schema. Gold/Red reuse the app's existing brass/flag
+   colors so they stay within the established palette rather than introducing new ones. */
+const TEE_PRESETS = [
+  { name: "Black", color: "#1A1A1A" },
+  { name: "Blue", color: "#2C5AA0" },
+  { name: "White", color: "#FBF9F2" },
+  { name: "Gold", color: "#A98B4F" },
+  { name: "Red", color: "#B23A2E" },
+];
+
+/* Courses created before this feature (or never given an explicit tee box) have no `tees`
+   array at all — rather than migrating every stored course, this synthesizes a single
+   "Default" tee from the course's own legacy top-level fields (course.rating/slope and each
+   hole's yardage/teeLat/teeLon — note: despite OSM-derived intermediate values being in
+   meters, a course's saved `hole.yardage` is always in YARDS, the app's canonical distance
+   unit — see displayDistance/ydToM/mToYd), so old and new courses can be read through the
+   exact same helper uniformly. Always returns at least one tee. */
+function getCourseTees(course) {
+  if (course?.tees?.length) return course.tees;
+  const holes = {};
+  (course?.holes || []).forEach((h) => {
+    holes[h.number] = { yardage: h.yardage ?? null, teeLat: h.teeLat ?? null, teeLon: h.teeLon ?? null };
+  });
+  return [{ id: "__default", name: "Default", color: C.turf, rating: course?.rating ?? null, slope: course?.slope ?? null, holes }];
+}
+
+/* per-tee, per-hole yardage (yards) + tee coordinates, with a graceful fallback: if the chosen
+   tee exists but happens to have no data for this specific hole (e.g. partial OpenStreetMap
+   coverage — some holes' tee markers colour-tagged, others not), falls back to the course's
+   own base hole data rather than showing nothing. teeId of null/undefined/unrecognized also
+   falls back to the first tee in the list (getCourseTees always returns at least one). */
+function getTeeHole(course, teeId, holeNumber) {
+  const tees = getCourseTees(course);
+  const tee = tees.find((t) => t.id === teeId) || tees[0];
+  const fromTee = tee?.holes?.[holeNumber];
+  const baseHole = (course?.holes || []).find((h) => h.number === holeNumber);
+  return {
+    yardage: fromTee?.yardage ?? baseHole?.yardage ?? null,
+    teeLat: fromTee?.teeLat ?? baseHole?.teeLat ?? null,
+    teeLon: fromTee?.teeLon ?? baseHole?.teeLon ?? null,
+  };
+}
+function teeById(course, teeId) {
+  const tees = getCourseTees(course);
+  return tees.find((t) => t.id === teeId) || tees[0];
+}
+
 /* orders a course's holes starting from the chosen tee (1st or 10th), wrapping around —
    used by the per-hole stroke-play scoring view so "starting hole" just rotates play order */
 function playOrderHoles(holes, startNumber) {
@@ -986,35 +1040,45 @@ function MicIcon({ size = 18, color }) {
    height by the flex row that renders them side by side — see the `alignItems: "stretch"`
    wrapper in PlayTab — with `flex: 1` on the button itself to actually fill that stretched
    space).
-   Recognizer errors (voiceError — mic blocked, Brave's broken backend, etc.) get a second
-   redesign, also 13 Aug: rather than always-visible inline text (which competed for the same
-   small footprint as the wind panel), the button greys out (CSS grayscale + reduced opacity)
-   with a small yellow/black warning badge, and tapping it while in that state opens a popup
-   with the actual error text instead of toggling voice caddy on/off. The badge lives in an
-   unfiltered sibling wrapper (not inside the grayscale'd button) so it stays full-color. */
-function VoiceCaddyButton({ voiceOn, setVoiceOn, voiceMsg, voiceError, mePlayer, wakeWord }) {
+   Two "trouble" states share one badge/popup treatment, also added 13 Aug at the user's
+   request: recognizer errors (voiceError — mic blocked, Brave's broken backend, etc.) and
+   heard-the-wake-word-but-didn't-match transcripts (voiceUnmatched). Rather than always-visible
+   inline text (which competed for the same small footprint as the wind panel), the button
+   greys out (CSS grayscale + reduced opacity) with a small yellow/black warning badge, and
+   tapping it while either is set opens a popup with the actual message instead of toggling
+   voice caddy on/off — worded and actioned differently per case (error: "Turn off voice
+   caddy"/"Dismiss", since the badge reflects an ongoing problem that isn't going away on its
+   own; unmatched: "Try again"/"Dismiss", since it's a one-off transient notice and both actions
+   clear it — "Try again" additionally speaks a short reminder of the wake-word phrasing, since
+   the golfer may not be looking at the screen). The two are mutually exclusive in practice —
+   handleVoiceCommand clears whichever isn't relevant before setting the other — so `trouble`
+   below is just whichever one is currently non-empty. The badge lives in an unfiltered sibling
+   wrapper (not inside the grayscale'd button) so it stays full-color. */
+function VoiceCaddyButton({ voiceOn, setVoiceOn, voiceMsg, voiceError, voiceUnmatched, setVoiceUnmatched, mePlayer, wakeWord }) {
   const supported = voiceSupported();
   const name = (wakeWord || "").trim() || "Gaddy";
-  const [showErrorPopup, setShowErrorPopup] = useState(false);
+  const [showTroublePopup, setShowTroublePopup] = useState(false);
+  const trouble = voiceError || voiceUnmatched;
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0 }}>
       <div style={{ position: "relative", display: "flex", flexDirection: "column", flex: 1, width: "100%" }}>
         <button
           title={
             voiceError ? "Voice caddy trouble — tap for details"
+            : voiceUnmatched ? "Didn't catch that — tap for details"
             : !supported ? "Voice control needs a browser with speech recognition (Chrome works best)"
             : !mePlayer ? "Mark a player as ⭐ you in the Players tab first"
             : voiceOn ? `Listening for "Hey ${name}, I'm using a..." or "Hey ${name}, record shot"`
             : "Turn on voice caddy"
           }
           disabled={!supported}
-          onClick={() => { if (voiceError) setShowErrorPopup(true); else setVoiceOn(!voiceOn); }}
+          onClick={() => { if (trouble) setShowTroublePopup(true); else setVoiceOn(!voiceOn); }}
           style={{
             display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3,
             flex: 1, minWidth: 58, border: `1px solid ${voiceOn ? C.flag : C.line}`, borderRadius: 8,
             background: voiceOn ? C.flag : C.white, padding: "0 10px", boxSizing: "border-box",
             opacity: supported ? 1 : 0.5, cursor: supported ? "pointer" : "not-allowed",
-            filter: voiceError ? "grayscale(1)" : "none",
+            filter: trouble ? "grayscale(1)" : "none",
           }}
         >
           <MicIcon size={18} color={voiceOn ? C.white : C.fairway} />
@@ -1022,7 +1086,7 @@ function VoiceCaddyButton({ voiceOn, setVoiceOn, voiceMsg, voiceError, mePlayer,
             {name}
           </span>
         </button>
-        {voiceError && (
+        {trouble && (
           <div
             aria-hidden="true"
             style={{
@@ -1037,21 +1101,39 @@ function VoiceCaddyButton({ voiceOn, setVoiceOn, voiceMsg, voiceError, mePlayer,
           </div>
         )}
       </div>
-      {voiceOn && voiceMsg && !voiceError && <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, maxWidth: 150, textAlign: "center", marginTop: 3 }}>{voiceMsg}</div>}
-      {showErrorPopup && voiceError && (
+      {voiceOn && voiceMsg && !trouble && <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, maxWidth: 150, textAlign: "center", marginTop: 3 }}>{voiceMsg}</div>}
+      {showTroublePopup && trouble && (
         <div
-          onClick={() => setShowErrorPopup(false)}
+          onClick={() => setShowTroublePopup(false)}
           style={{ position: "fixed", inset: 0, background: "rgba(20,20,16,0.55)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 14 }}
         >
           <div onClick={(e) => e.stopPropagation()} style={{ background: C.paper, borderRadius: 10, padding: 18, width: "100%", maxWidth: 340, boxSizing: "border-box" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
               <div style={{ width: 22, height: 22, borderRadius: "50%", background: "#F2C230", color: "#1A1A14", fontFamily: sans, fontSize: 13, fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>!</div>
-              <div style={{ fontFamily: serif, fontSize: 16, color: C.fairway }}>Voice caddy trouble</div>
+              <div style={{ fontFamily: serif, fontSize: 16, color: C.fairway }}>{voiceError ? "Voice caddy trouble" : "Didn't catch that"}</div>
             </div>
-            <div style={{ fontFamily: sans, fontSize: 13, color: C.ink, lineHeight: 1.5, marginBottom: 16 }}>{voiceError}</div>
+            <div style={{ fontFamily: sans, fontSize: 13, color: C.ink, lineHeight: 1.5, marginBottom: 16 }}>{trouble}</div>
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-              <button style={btnGhost} onClick={() => { setVoiceOn(false); setShowErrorPopup(false); }}>Turn off voice caddy</button>
-              <button style={btnPrimary} onClick={() => setShowErrorPopup(false)}>Dismiss</button>
+              {voiceError ? (
+                <>
+                  <button style={btnGhost} onClick={() => { setVoiceOn(false); setShowTroublePopup(false); }}>Turn off voice caddy</button>
+                  <button style={btnPrimary} onClick={() => setShowTroublePopup(false)}>Dismiss</button>
+                </>
+              ) : (
+                <>
+                  <button style={btnGhost} onClick={() => { setVoiceUnmatched(""); setShowTroublePopup(false); }}>Dismiss</button>
+                  <button
+                    style={btnPrimary}
+                    onClick={() => {
+                      speak(`Try again — say "Hey ${name}" plus a club name, or "Hey ${name}, record shot."`);
+                      setVoiceUnmatched("");
+                      setShowTroublePopup(false);
+                    }}
+                  >
+                    Try again
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -1233,6 +1315,13 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
   const [numHoles, setNumHoles] = useState(18);
   const [rating, setRating] = useState("");
   const [slope, setSlope] = useState("");
+  /* tee-box colors (13 Aug feature) — the holes table above always describes the "primary" tee
+     (teeColor, defaulting to White); additional tee boxes are optional and only need par/color/
+     rating/slope/per-hole yardage — GPS pins aren't collected per-tee here (that data essentially
+     never exists outside a single OpenStreetMap-mapped tee location), so every tee shares the
+     primary tee's teeLat/teeLon via getTeeHole's fallback. */
+  const [teeColor, setTeeColor] = useState("White");
+  const [extraTees, setExtraTees] = useState([]);
   const [manualLat, setManualLat] = useState("");
   const [manualLon, setManualLon] = useState("");
   const [holes, setHoles] = useState(
@@ -1384,6 +1473,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
     setName(""); setNumHoles(18); setRating(""); setSlope(""); setManualLat(""); setManualLon("");
     setHoles(Array.from({ length: 18 }, (_, i) => ({ number: i + 1, par: 4, yardage: "", strokeIndex: "", teeLat: null, teeLon: null, greenLat: null, greenLon: null })));
     setOsmQuery(""); setOsmResults([]); setOsmStatus(""); setOsmFailed(false); setLastOSMCandidate(null); setOsmFromCache(false);
+    setTeeColor("White"); setExtraTees([]);
     setAdding(false);
   }
   function updateHoleCount(n) {
@@ -1394,6 +1484,32 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
     const next = [...holes];
     next[i] = { ...next[i], [field]: val };
     setHoles(next);
+  }
+  function nextUnusedPreset() {
+    const used = new Set([teeColor, ...extraTees.map((t) => t.name)]);
+    return TEE_PRESETS.find((p) => !used.has(p.name)) || TEE_PRESETS[0];
+  }
+  function addExtraTee() {
+    const preset = nextUnusedPreset();
+    setExtraTees([...extraTees, { id: uid(), name: preset.name, color: preset.color, rating: "", slope: "", yardages: {} }]);
+  }
+  function updateExtraTee(i, field, val) {
+    const next = [...extraTees];
+    if (field === "name") {
+      const preset = TEE_PRESETS.find((p) => p.name === val);
+      next[i] = { ...next[i], name: val, color: preset?.color || next[i].color };
+    } else {
+      next[i] = { ...next[i], [field]: val };
+    }
+    setExtraTees(next);
+  }
+  function updateExtraTeeYardage(i, holeNumber, val) {
+    const next = [...extraTees];
+    next[i] = { ...next[i], yardages: { ...next[i].yardages, [holeNumber]: val } };
+    setExtraTees(next);
+  }
+  function removeExtraTee(i) {
+    setExtraTees(extraTees.filter((_, idx) => idx !== i));
   }
   function autoFillStrokeIndex() {
     const next = holes.map((h, i) => ({ ...h, strokeIndex: (i % 18) + 1 }));
@@ -1409,6 +1525,32 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
   }
   function saveCourse() {
     if (!name.trim()) return;
+    const primaryPreset = TEE_PRESETS.find((p) => p.name === teeColor);
+    const primaryTeeHoles = {};
+    holes.forEach((h) => {
+      primaryTeeHoles[h.number] = { yardage: h.yardage ? Number(h.yardage) : null, teeLat: h.teeLat ?? null, teeLon: h.teeLon ?? null };
+    });
+    const tees = [
+      {
+        id: uid(), name: teeColor, color: primaryPreset?.color || C.turf,
+        rating: rating ? Number(rating) : null, slope: slope ? Number(slope) : null,
+        holes: primaryTeeHoles,
+      },
+      ...extraTees.map((t) => {
+        const teeHoles = {};
+        holes.forEach((h) => {
+          const yd = t.yardages[h.number];
+          // extra tees don't collect their own GPS pin (see the note above addExtraTee) — leave
+          // teeLat/teeLon unset so getTeeHole() falls back to the primary tee's location
+          teeHoles[h.number] = { yardage: yd ? Number(yd) : null, teeLat: null, teeLon: null };
+        });
+        return {
+          id: t.id, name: t.name, color: t.color,
+          rating: t.rating ? Number(t.rating) : null, slope: t.slope ? Number(t.slope) : null,
+          holes: teeHoles,
+        };
+      }),
+    ];
     const course = {
       id: uid(), name: name.trim(),
       lat: manualLat !== "" ? Number(manualLat) : null,
@@ -1418,6 +1560,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
         number: h.number, par: Number(h.par) || 4, yardage: h.yardage ? Number(h.yardage) : null, strokeIndex: h.strokeIndex ? Number(h.strokeIndex) : null,
         teeLat: h.teeLat ?? null, teeLon: h.teeLon ?? null, greenLat: h.greenLat ?? null, greenLon: h.greenLon ?? null,
       })),
+      tees,
     };
     setCourses([...courses, course]);
     resetForm();
@@ -1559,7 +1702,51 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
               </tbody>
             </table>
           </div>
-          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 10 }}>
+
+          <div style={{ marginTop: 16 }}>
+            <div style={{ fontFamily: sans, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: C.turf, marginBottom: 8 }}>Tee boxes</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+              <span style={{ width: 10, height: 10, borderRadius: "50%", display: "inline-block", background: TEE_PRESETS.find((p) => p.name === teeColor)?.color, border: `1px solid ${C.line}`, flexShrink: 0 }} />
+              <span style={{ fontFamily: sans, fontSize: 12, color: C.turf }}>The par/distance table above is from the</span>
+              <select style={selectStyle} value={teeColor} onChange={(e) => setTeeColor(e.target.value)}>
+                {TEE_PRESETS.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
+              </select>
+              <span style={{ fontFamily: sans, fontSize: 12, color: C.turf }}>tees</span>
+            </div>
+
+            {extraTees.map((t, i) => (
+              <div key={t.id} style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 6, padding: 10, marginBottom: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                  <span style={{ width: 10, height: 10, borderRadius: "50%", display: "inline-block", background: t.color, border: `1px solid ${C.line}`, flexShrink: 0 }} />
+                  <select style={selectStyle} value={t.name} onChange={(e) => updateExtraTee(i, "name", e.target.value)}>
+                    {TEE_PRESETS.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
+                  </select>
+                  <input style={{ ...inputStyle, width: 80 }} placeholder="Rating" value={t.rating} onChange={(e) => updateExtraTee(i, "rating", e.target.value)} />
+                  <input style={{ ...inputStyle, width: 70 }} placeholder="Slope" value={t.slope} onChange={(e) => updateExtraTee(i, "slope", e.target.value)} />
+                  <button style={{ ...btnDanger, marginLeft: "auto" }} onClick={() => removeExtraTee(i)}>Remove</button>
+                </div>
+                <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, marginBottom: 6 }}>
+                  Distance per hole ({distanceUnit === "m" ? "m" : "yd"}) — par and stroke index come from the table above
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(58px, 1fr))", gap: 6 }}>
+                  {holes.map((h) => (
+                    <div key={h.number} style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+                      <span style={{ fontFamily: mono, fontSize: 10, color: C.turf }}>#{h.number}</span>
+                      <input
+                        style={{ ...inputStyle, width: "100%", padding: "3px 4px", fontSize: 12, textAlign: "center", boxSizing: "border-box" }}
+                        value={displayDistance(t.yardages[h.number] || "", distanceUnit)}
+                        onChange={(e) => updateExtraTeeYardage(i, h.number, toYardsFromInput(e.target.value, distanceUnit))}
+                        placeholder={distanceUnit === "m" ? "m" : "yds"}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+            <button style={{ ...btnGhost, fontSize: 12 }} onClick={addExtraTee} disabled={extraTees.length >= TEE_PRESETS.length - 1}>+ Add another tee box</button>
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 16 }}>
             <button style={{ ...btnGhost, fontSize: 12 }} onClick={autoFillStrokeIndex}>Auto-fill stroke index 1–{numHoles}</button>
             <button style={btnPrimary} onClick={saveCourse}>Save course</button>
           </div>
@@ -1581,6 +1768,16 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
               {c.rating ? ` · Rating ${c.rating}/${c.slope || 113}` : ""}
               {location && c.lat != null ? ` · ${haversine(location.lat, location.lon, c.lat, c.lon).toFixed(1)} mi away` : ""}
             </div>
+            {c.tees?.length > 1 && (
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                {c.tees.map((t) => (
+                  <span key={t.id} style={{ display: "flex", alignItems: "center", gap: 3, fontFamily: sans, fontSize: 11, color: C.turf }}>
+                    <span style={{ width: 8, height: 8, borderRadius: "50%", display: "inline-block", background: t.color, border: `1px solid ${C.line}` }} />
+                    {t.name}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         ))}
       </div>
@@ -1834,10 +2031,22 @@ function bbHoleScore(state) {
   return pre + Math.min(a, b);
 }
 
-function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, playerBName, playerAId, playerBId, state, onUpdate, onMarkDrive, onMarkShot, livePos, distanceUnit, mePlayerId, meBag }) {
+function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, playerBName, playerAId, playerBId, state, onUpdate, onMarkDrive, onMarkShot, livePos, distanceUnit, mePlayerId, meBag, course, teeAssign }) {
   const s = state || defaultBBHole();
   const remainingYards = hole.greenLat != null && livePos ? haversineYards(livePos.lat, livePos.lon, hole.greenLat, hole.greenLon) : null;
   const suggestion = meBag?.length > 0 ? suggestClub(meBag, remainingYards) : null;
+  const unitLabel = distanceUnit === "m" ? "m" : "y";
+  const courseTees = course ? getCourseTees(course) : [];
+  const defaultTeeId = courseTees[0]?.id;
+  function teeInfoFor(pid) {
+    const teeId = teeAssign?.[pid] || defaultTeeId;
+    const tee = courseTees.find((t) => t.id === teeId);
+    if (!tee || teeId === defaultTeeId) return null;
+    const teeHole = course ? getTeeHole(course, teeId, hole.number) : null;
+    return { tee, yardage: teeHole?.yardage };
+  }
+  const teeInfoA = teeInfoFor(playerAId);
+  const teeInfoB = teeInfoFor(playerBId);
 
   function patch(next) { onUpdate({ ...s, ...next }); }
   function patchRound(i, next) {
@@ -1883,6 +2092,14 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
                   <div style={{ display: "flex", gap: 10, marginBottom: 4 }}>
                     <div>
                       {playerAName}
+                      {teeInfoA && (
+                        <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 1, marginBottom: 2 }}>
+                          <span style={{ width: 7, height: 7, borderRadius: "50%", display: "inline-block", background: teeInfoA.tee.color, border: `1px solid ${C.line}`, flexShrink: 0 }} />
+                          <span style={{ fontFamily: sans, fontSize: 10, color: C.turf }}>
+                            {teeInfoA.tee.name}{teeInfoA.yardage ? ` · ${displayDistance(teeInfoA.yardage, distanceUnit)}${unitLabel}` : ""}
+                          </span>
+                        </div>
+                      )}
                       <ShapeSelector par={hole.par} value={r.shapeA} onChange={(v) => patchRound(i, { shapeA: v })} />
                       {hole.teeLat != null && (
                         <button style={{ ...btnGhost, fontSize: 10, padding: "3px 6px", marginTop: 4 }} onClick={() => onMarkDrive && onMarkDrive("A")}>
@@ -1899,6 +2116,14 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
                     </div>
                     <div>
                       {playerBName}
+                      {teeInfoB && (
+                        <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 1, marginBottom: 2 }}>
+                          <span style={{ width: 7, height: 7, borderRadius: "50%", display: "inline-block", background: teeInfoB.tee.color, border: `1px solid ${C.line}`, flexShrink: 0 }} />
+                          <span style={{ fontFamily: sans, fontSize: 10, color: C.turf }}>
+                            {teeInfoB.tee.name}{teeInfoB.yardage ? ` · ${displayDistance(teeInfoB.yardage, distanceUnit)}${unitLabel}` : ""}
+                          </span>
+                        </div>
+                      )}
                       <ShapeSelector par={hole.par} value={r.shapeB} onChange={(v) => patchRound(i, { shapeB: v })} />
                       {hole.teeLat != null && (
                         <button style={{ ...btnGhost, fontSize: 10, padding: "3px 6px", marginTop: 4 }} onClick={() => onMarkDrive && onMarkDrive("B")}>
@@ -1992,7 +2217,7 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
    BetterBallHoleCard(s) side by side underneath, plus the same Next/Finish hole button. */
 function BetterBallFocusedHole({
   hole, isLast, solo, pA1, pB1, pA2, pB2, team1Ids, team2Ids, bbState, distanceUnit, livePos,
-  mePlayerId, mePlayer, onUpdateTeam1, onUpdateTeam2, onMarkDrive1, onMarkShot1, onMarkDrive2, onMarkShot2, onNext,
+  mePlayerId, mePlayer, course, teeAssign, onUpdateTeam1, onUpdateTeam2, onMarkDrive1, onMarkShot1, onMarkDrive2, onMarkShot2, onNext,
 }) {
   const liveYards = hole.greenLat != null && livePos ? haversineYards(livePos.lat, livePos.lon, hole.greenLat, hole.greenLon) : null;
   const unitLabel = distanceUnit === "m" ? "m" : "y";
@@ -2019,13 +2244,15 @@ function BetterBallFocusedHole({
           playerAId={team1Ids[0]} playerBId={team1Ids[1]}
           state={bbState.team1?.[hole.number]} onUpdate={onUpdateTeam1}
           onMarkDrive={onMarkDrive1} onMarkShot={onMarkShot1}
-          livePos={livePos} distanceUnit={distanceUnit} mePlayerId={mePlayerId} meBag={mePlayer?.bag} />
+          livePos={livePos} distanceUnit={distanceUnit} mePlayerId={mePlayerId} meBag={mePlayer?.bag}
+          course={course} teeAssign={teeAssign} />
         {!solo && (
           <BetterBallHoleCard hole={hole} teamKey="team2" teamColor={C.team2} teamLabel="Team 2" playerAName={pA2?.name || "A"} playerBName={pB2?.name || "B"}
             playerAId={team2Ids[0]} playerBId={team2Ids[1]}
             state={bbState.team2?.[hole.number]} onUpdate={onUpdateTeam2}
             onMarkDrive={onMarkDrive2} onMarkShot={onMarkShot2}
-            livePos={livePos} distanceUnit={distanceUnit} mePlayerId={mePlayerId} meBag={mePlayer?.bag} />
+            livePos={livePos} distanceUnit={distanceUnit} mePlayerId={mePlayerId} meBag={mePlayer?.bag}
+            course={course} teeAssign={teeAssign} />
         )}
       </div>
 
@@ -2039,10 +2266,15 @@ function BetterBallFocusedHole({
 /* single "focused" hole in the per-hole stroke-play scoring view — occupies most of the
    screen while active; one compact card per selected player inside it. Direction/putts and
    shot-marking sit side by side as equal-width flex columns so neither overflows the card. */
-function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit, livePos, mePlayer, onScoreField, onMarkDrive, onMarkNextShot, onNext }) {
+function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit, livePos, mePlayer, course, teeAssign, onScoreField, onMarkDrive, onMarkNextShot, onNext }) {
   const liveYards = hole.greenLat != null && livePos ? haversineYards(livePos.lat, livePos.lon, hole.greenLat, hole.greenLon) : null;
   const suggestion = liveYards != null && mePlayer?.bag?.length ? suggestClub(mePlayer.bag, liveYards) : null;
   const unitLabel = distanceUnit === "m" ? "m" : "y";
+  /* the header distance above reflects the course's first/default tee; when a player is
+     assigned a different tee box (13 Aug tee-color feature) their own tee's yardage — which can
+     differ meaningfully — is shown under their name instead of repeating the shared header */
+  const courseTees = course ? getCourseTees(course) : [];
+  const defaultTeeId = courseTees[0]?.id;
 
   return (
     <div style={{ padding: 12, background: C.white }}>
@@ -2068,10 +2300,24 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
           const cell = scores[pid]?.[hole.number] || {};
           const player = players.find((p) => p.id === pid);
           const extraShots = cell.extraShots || [];
+          const playerTeeId = teeAssign?.[pid] || defaultTeeId;
+          const playerTee = courseTees.find((t) => t.id === playerTeeId);
+          const playerTeeHole = course ? getTeeHole(course, playerTeeId, hole.number) : null;
+          const showPlayerTee = playerTee && playerTeeId !== defaultTeeId;
           return (
             <div key={pid} style={{ border: `1px solid ${C.line}`, borderRadius: 6, padding: 8 }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6, gap: 8 }}>
-                <div style={{ fontFamily: sans, fontSize: 13, fontWeight: 700, color: C.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{player?.name}</div>
+                <div style={{ minWidth: 0, overflow: "hidden" }}>
+                  <div style={{ fontFamily: sans, fontSize: 13, fontWeight: 700, color: C.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{player?.name}</div>
+                  {showPlayerTee && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 2 }}>
+                      <span style={{ width: 7, height: 7, borderRadius: "50%", display: "inline-block", background: playerTee.color, border: `1px solid ${C.line}`, flexShrink: 0 }} />
+                      <span style={{ fontFamily: sans, fontSize: 10, color: C.turf }}>
+                        {playerTee.name}{playerTeeHole?.yardage ? ` · ${displayDistance(playerTeeHole.yardage, distanceUnit)}${unitLabel}` : ""}
+                      </span>
+                    </div>
+                  )}
+                </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
                   <input
                     type="number"
@@ -2158,6 +2404,13 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
   const [overrides, setOverrides] = useState(savedRound?.overrides || {});
   const [scores, setScores] = useState(savedRound?.scores || {});
   const [teamAssign, setTeamAssign] = useState(savedRound?.teamAssign || {});
+  /* which tee-color set (from course.tees) each selected player is playing from — 13 Aug tee-box
+     feature. Keyed by player id, value is a tee id (see getCourseTees/getTeeHole). Defaulted to
+     the course's first tee as each player is selected (see togglePlayer); reset whenever the
+     course itself changes, since tee ids are course-specific and stale ids would silently fall
+     back to tees[0] anyway via teeIdFor() — resetting avoids carrying a same-shaped-but-wrong id
+     across courses. */
+  const [teeAssign, setTeeAssign] = useState(savedRound?.teeAssign || {});
   const [bbState, setBbState] = useState(savedRound?.bbState || { team1: {}, team2: {} });
   const [startHole, setStartHole] = useState(savedRound?.startHole || 1);
   const [activeIdx, setActiveIdx] = useState(savedRound?.activeIdx ?? 0);
@@ -2170,16 +2423,37 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
      tap-to-open popup (see VoiceCaddyButton) instead of always-visible text competing for the
      same small footprint as the wind panel next to it. */
   const [voiceError, setVoiceError] = useState("");
+  /* same treatment, 13 Aug, for "heard the wake word but didn't recognize what followed" —
+     also moved out of the always-visible voiceMsg line into the badge+popup pattern, with
+     "Try again"/"Dismiss" actions instead of error's "Turn off"/"Dismiss" (see VoiceCaddyButton).
+     Mutually exclusive with voiceError in practice — handleVoiceCommand clears whichever one
+     isn't relevant to the current event before setting the other. */
+  const [voiceUnmatched, setVoiceUnmatched] = useState("");
   const [resumedNotice, setResumedNotice] = useState(!!savedRound);
 
-  /* clear a stale error as soon as voice caddy is turned off (manually, or via the error
-     popup's "Turn off" button) — next time it's turned on it starts clean rather than showing
-     a greyed-out/badged button before a new error has actually happened. */
-  useEffect(() => { if (!voiceOn) setVoiceError(""); }, [voiceOn]);
+  /* clear stale trouble state as soon as voice caddy is turned off (manually, or via a popup's
+     "Turn off"/dismiss action) — next time it's turned on it starts clean rather than showing a
+     greyed-out/badged button before anything has actually happened this session. */
+  useEffect(() => { if (!voiceOn) { setVoiceError(""); setVoiceUnmatched(""); } }, [voiceOn]);
 
   const course = courses.find((c) => c.id === courseId);
   const livePos = useLivePosition(step === "scoring");
   const mePlayer = players.find((p) => p.id === mePlayerId);
+
+  /* resolve a player's assigned tee id, falling back to the course's first tee if unset (e.g.
+     a player selected before teeAssign existed, or a stale id from a since-changed course) */
+  function teeIdFor(pid) { return teeAssign[pid] || getCourseTees(course)[0]?.id; }
+
+  /* tee ids are course-specific — if the chosen course changes mid-setup, drop any assignments
+     so nobody's silently left pointing at another course's tee id. Guarded against firing on
+     mount (which would wipe a resumed round's teeAssign before it's ever read). */
+  const prevCourseIdRef = useRef(courseId);
+  useEffect(() => {
+    if (prevCourseIdRef.current !== courseId) {
+      setTeeAssign({});
+      prevCourseIdRef.current = courseId;
+    }
+  }, [courseId]);
 
   /* wind indicator: prefer the course's own stored coordinates (stable — doesn't refetch as
      the golfer walks the course); if the course has none, lock onto the first GPS fix of the
@@ -2214,8 +2488,8 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
      lose it — only while actively scoring; the setup screen and finished rounds don't persist */
   useEffect(() => {
     if (step !== "scoring") return;
-    saveKey(ACTIVE_ROUND_KEY, { format, courseId, selected, overrides, scores, teamAssign, bbState, startHole, activeIdx });
-  }, [step, format, courseId, selected, overrides, scores, teamAssign, bbState, startHole, activeIdx]);
+    saveKey(ACTIVE_ROUND_KEY, { format, courseId, selected, overrides, scores, teamAssign, teeAssign, bbState, startHole, activeIdx });
+  }, [step, format, courseId, selected, overrides, scores, teamAssign, teeAssign, bbState, startHole, activeIdx]);
 
   /* tells App() whether a round is actively being scored right now, plus enough to render the
      ribbon's compact header (course name / format) and let its hamburger menu's "Back to
@@ -2237,9 +2511,14 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
     if (selected.includes(id)) {
       setSelected(selected.filter((s) => s !== id));
       const next = { ...teamAssign }; delete next[id]; setTeamAssign(next);
-    } else if (selected.length < 4) setSelected([...selected, id]);
+      const nextTee = { ...teeAssign }; delete nextTee[id]; setTeeAssign(nextTee);
+    } else if (selected.length < 4) {
+      setSelected([...selected, id]);
+      setTeeAssign({ ...teeAssign, [id]: getCourseTees(course)[0]?.id });
+    }
   }
   function setTeam(pid, team) { setTeamAssign({ ...teamAssign, [pid]: team }); }
+  function setPlayerTee(pid, teeId) { setTeeAssign({ ...teeAssign, [pid]: teeId }); }
 
   const isTwoBall = selected.length === 2;
   const isFourBall = selected.length === 4;
@@ -2391,6 +2670,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
   const team1IdsRef = useRef(team1Ids);
   const team2IdsRef = useRef(team2Ids);
   const activeHoleRef = useRef(activeHole);
+  const teeAssignRef = useRef(teeAssign);
   useEffect(() => { mePlayerIdRef.current = mePlayerId; }, [mePlayerId]);
   useEffect(() => { livePosRef.current = livePos; }, [livePos]);
   useEffect(() => { courseRef.current = course; }, [course]);
@@ -2401,6 +2681,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
   useEffect(() => { bbStateRef.current = bbState; }, [bbState]);
   useEffect(() => { team1IdsRef.current = team1Ids; });
   useEffect(() => { team2IdsRef.current = team2Ids; });
+  useEffect(() => { teeAssignRef.current = teeAssign; }, [teeAssign]);
 
   const handleVoiceCommand = useCallback((kind, payload, transcript) => {
     if (kind === "error") {
@@ -2419,6 +2700,9 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
     // so a closed-over voiceError value would always be stale; setVoiceError("") when it's
     // already "" is a harmless no-op re-render.)
     setVoiceError("");
+    // only "unmatched" itself re-sets voiceUnmatched below — clear it here for every other kind
+    // so a stale "didn't catch that" badge doesn't linger once a command actually succeeds
+    if (kind !== "unmatched") setVoiceUnmatched("");
     const me = mePlayerIdRef.current;
     if (!me) { setVoiceMsg("Mark a player as ⭐ you in the Players tab first."); speak("Mark a player as you first."); return; }
     // both formats now use the same per-hole view — voice/auto-detect always target whichever
@@ -2431,10 +2715,12 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
     }
 
     if (kind === "unmatched") {
-      // deliberately no spoken reply here — a wake word alone shouldn't interrupt mid-swing;
-      // the visible transcript is what lets a mis-heard phrase be diagnosed instead of looking
-      // like the mic just isn't picking anything up at all
-      setVoiceMsg(`Heard: "${transcript}" — didn't catch a club name or "record shot". Try "I'm using a 6 iron" or "record shot".`);
+      // deliberately no spoken reply on its own here — a wake word alone shouldn't interrupt
+      // mid-swing; the badge + popup (see VoiceCaddyButton) is what lets a mis-heard phrase be
+      // diagnosed instead of looking like the mic just isn't picking anything up at all. Voice
+      // caddy itself only speaks in response to the popup's own "Try again" tap (a deliberate
+      // user action), not automatically on every unmatched utterance.
+      setVoiceUnmatched(`Heard: "${transcript}" — didn't catch a club name or "record shot". Try "I'm using a 6 iron" or "record shot".`);
       return;
     }
     if (kind === "club") {
@@ -2454,8 +2740,13 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
     if (kind === "recordShot") {
       const pos = livePosRef.current;
       if (!pos) { setVoiceMsg('Heard "record shot" but don\'t have your GPS position yet.'); speak("Don't have your location yet."); return; }
+      // "you" (the voice caddy only ever tracks mePlayerId) might be on a different tee box
+      // than the shared hole object's default tee — same call-site override as the manual
+      // mark-drive buttons (see markDriveForStroke's comment)
+      const myTee = getTeeHole(courseRef.current, (teeAssignRef.current || {})[me] || getCourseTees(courseRef.current)[0]?.id, hole.number);
+      const holeForMe = { ...hole, teeLat: myTee.teeLat, teeLon: myTee.teeLon };
       const pending = computePendingShot({
-        hole, format: formatRef.current, mePlayerId: me, selected: selectedRef.current,
+        hole: holeForMe, format: formatRef.current, mePlayerId: me, selected: selectedRef.current,
         scores: scoresRef.current, bbState: bbStateRef.current,
         team1Ids: team1IdsRef.current, team2Ids: team2IdsRef.current,
       });
@@ -2463,11 +2754,11 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
       const posArg = { lat: pos.lat, lon: pos.lon };
       let result;
       if (pending.kind === "stroke") {
-        result = pending.isDrive ? recordStrokeDrive(me, hole, posArg) : recordStrokeNextShot(me, hole, posArg);
+        result = pending.isDrive ? recordStrokeDrive(me, holeForMe, posArg) : recordStrokeNextShot(me, holeForMe, posArg);
       } else {
         result = pending.isDrive
-          ? recordBBDrive(pending.teamKey, pending.who, hole, posArg)
-          : recordBBShotAtRound(pending.teamKey, pending.who, hole, pending.roundIndex, posArg);
+          ? recordBBDrive(pending.teamKey, pending.who, holeForMe, posArg)
+          : recordBBShotAtRound(pending.teamKey, pending.who, holeForMe, pending.roundIndex, posArg);
       }
       announceShotResult(result, { speakAloud: true });
     }
@@ -2478,7 +2769,8 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
   /* auto shot-stop detection — scoped to "you" only, see computePendingShot/shotDetectorStep.
      Both formats now use the same per-hole view, so the "current hole" is always whichever hole
      is active there (the player chose it), not whatever GPS thinks is nearest. */
-  const currentHoleForMe = activeHole;
+  const myTeeHole = activeHole ? getTeeHole(course, teeIdFor(mePlayerId), activeHole.number) : null;
+  const currentHoleForMe = activeHole ? { ...activeHole, teeLat: myTeeHole.teeLat, teeLon: myTeeHole.teeLon } : null;
   const myPending = step === "scoring"
     ? computePendingShot({ hole: currentHoleForMe, format, mePlayerId, selected, scores, bbState, team1Ids, team2Ids })
     : null;
@@ -2539,13 +2831,20 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
           updatedPlayers[pIdx].shotStats.push({ date, courseName: course.name, par: h.par, shape: cell.shape });
         }
       });
+      // handicap/differential math uses whichever tee this player is assigned to, not the
+      // course's legacy top-level rating/slope — those two only differ when the course has
+      // more than one tee box (see the 13 Aug tee-color feature); teeById() falls back to the
+      // course's single/default tee otherwise, so this is a no-op for single-tee courses.
+      const tee = teeById(course, teeAssign[pid]);
+      const teeSlope = tee?.slope ?? course.slope;
+      const teeRating = tee?.rating ?? course.rating;
       const hi = playerHandicapIndex(pid);
-      const ch = courseHandicap(hi, course.slope, course.rating, par);
+      const ch = courseHandicap(hi, teeSlope, teeRating, par);
       const net = gross - ch;
-      roundScores[pid] = { holes: holesObj, gross, net, courseHandicap: ch };
+      roundScores[pid] = { holes: holesObj, gross, net, courseHandicap: ch, teeId: tee?.id ?? null, teeName: tee?.name ?? null };
 
-      const rating = course.rating != null ? course.rating : par;
-      const slope = course.slope || 113;
+      const rating = teeRating != null ? teeRating : par;
+      const slope = teeSlope || 113;
       const differential = ((gross - rating) * 113) / slope;
       const pIdx = updatedPlayers.findIndex((p) => p.id === pid);
       if (pIdx >= 0) updatedPlayers[pIdx].differentials.push({ value: Math.round(differential * 10) / 10, date, courseName: course.name });
@@ -2579,7 +2878,10 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
           if (pIdxB >= 0 && firstRound.shapeB) updatedPlayers[pIdxB].shotStats.push({ date, courseName: course.name, par: h.par, shape: firstRound.shapeB });
         }
       });
-      return { playerIds: ids, holeScores, holeDetails, total: complete ? total : total, complete };
+      // better ball doesn't use handicap math, but record which tee each player was on for
+      // History/consistency with stroke play (see the 13 Aug tee-color feature)
+      const teeIds = ids.map((id) => teeAssign[id] || null);
+      return { playerIds: ids, teeIds, holeScores, holeDetails, total: complete ? total : total, complete };
     }
 
     const solo = team2Ids.length === 0;
@@ -2597,7 +2899,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
   }
 
   function resetAll() {
-    setStep("setup"); setSelected([]); setOverrides({}); setScores({}); setTeamAssign({}); setBbState({ team1: {}, team2: {} });
+    setStep("setup"); setSelected([]); setOverrides({}); setScores({}); setTeamAssign({}); setTeeAssign({}); setBbState({ team1: {}, team2: {} });
     setStartHole(1); setActiveIdx(0);
     saveKey(ACTIVE_ROUND_KEY, null);
     setResumedNotice(false);
@@ -2641,39 +2943,56 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
           {players.map((p) => {
             const on = selected.includes(p.id);
             const hi = computeHandicapIndex(p.differentials.map((d) => d.value));
+            const courseTees = getCourseTees(course);
+            const playerTeeId = teeAssign[p.id] || courseTees[0]?.id;
             return (
               <div key={p.id} onClick={() => togglePlayer(p.id)}
-                style={{ ...cardStyle, cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center",
+                style={{ ...cardStyle, cursor: "pointer",
                   borderColor: on ? C.fairway : C.line, background: on ? C.paper2 : C.white }}>
-                <div style={{ fontFamily: sans, fontSize: 14, fontWeight: on ? 700 : 400, color: C.ink }}>{p.name}</div>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <span style={{ fontFamily: mono, fontSize: 13, color: C.turf }}>{hi != null ? `HI ${hi.toFixed(1)}` : "HI —"}</span>
-                  {on && format === "stroke" && (
-                    <input
-                      style={{ ...inputStyle, width: 70, padding: "4px 6px" }}
-                      placeholder="override"
-                      value={overrides[p.id] ?? ""}
-                      onClick={(e) => e.stopPropagation()}
-                      onChange={(e) => setOverrides({ ...overrides, [p.id]: e.target.value })}
-                    />
-                  )}
-                  {on && format === "betterball" && isFourBall && (
-                    <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", gap: 6 }}>
-                      {[1, 2].map((t) => (
-                        <button key={t} onClick={() => setTeam(p.id, t)}
-                          style={{ fontSize: 13, padding: "6px 12px", borderRadius: 5, cursor: "pointer", fontFamily: sans, fontWeight: 600,
-                            border: `1px solid ${teamAssign[p.id] === t ? (t === 1 ? C.team1 : C.team2) : C.line}`,
-                            background: teamAssign[p.id] === t ? (t === 1 ? C.team1 : C.team2) : C.white,
-                            color: teamAssign[p.id] === t ? C.white : C.ink }}>
-                          Team {t}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                  {on && format === "betterball" && isTwoBall && (
-                    <span style={{ fontFamily: sans, fontSize: 12, color: C.turf }}>Partners</span>
-                  )}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div style={{ fontFamily: sans, fontSize: 14, fontWeight: on ? 700 : 400, color: C.ink }}>{p.name}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <span style={{ fontFamily: mono, fontSize: 13, color: C.turf }}>{hi != null ? `HI ${hi.toFixed(1)}` : "HI —"}</span>
+                    {on && format === "stroke" && (
+                      <input
+                        style={{ ...inputStyle, width: 70, padding: "4px 6px" }}
+                        placeholder="override"
+                        value={overrides[p.id] ?? ""}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => setOverrides({ ...overrides, [p.id]: e.target.value })}
+                      />
+                    )}
+                    {on && format === "betterball" && isFourBall && (
+                      <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", gap: 6 }}>
+                        {[1, 2].map((t) => (
+                          <button key={t} onClick={() => setTeam(p.id, t)}
+                            style={{ fontSize: 13, padding: "6px 12px", borderRadius: 5, cursor: "pointer", fontFamily: sans, fontWeight: 600,
+                              border: `1px solid ${teamAssign[p.id] === t ? (t === 1 ? C.team1 : C.team2) : C.line}`,
+                              background: teamAssign[p.id] === t ? (t === 1 ? C.team1 : C.team2) : C.white,
+                              color: teamAssign[p.id] === t ? C.white : C.ink }}>
+                            Team {t}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {on && format === "betterball" && isTwoBall && (
+                      <span style={{ fontFamily: sans, fontSize: 12, color: C.turf }}>Partners</span>
+                    )}
+                  </div>
                 </div>
+                {on && courseTees.length > 1 && (
+                  <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
+                    <span style={{ fontFamily: sans, fontSize: 11, color: C.turf }}>Tees:</span>
+                    <span style={{ width: 9, height: 9, borderRadius: "50%", display: "inline-block", background: courseTees.find((t) => t.id === playerTeeId)?.color || C.turf, border: `1px solid ${C.line}`, flexShrink: 0 }} />
+                    <select
+                      style={{ ...inputStyle, padding: "4px 6px", fontSize: 12, width: "auto" }}
+                      value={playerTeeId}
+                      onChange={(e) => setPlayerTee(p.id, e.target.value)}
+                    >
+                      {courseTees.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                    </select>
+                  </div>
+                )}
               </div>
             );
           })}
@@ -2697,12 +3016,17 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
     function markDriveForStroke(pid) {
       const h = activeHole;
       if (!h) return;
+      // override the shared hole's tee anchor with this player's own tee box, if their
+      // assigned tee has one (13 Aug tee-color feature) — recordStrokeDrive reads teeLat/teeLon
+      // from whichever hole object it's given, so this is a plain call-site substitution
+      const pTee = getTeeHole(course, teeIdFor(pid), h.number);
+      const hForP = { ...h, teeLat: pTee.teeLat, teeLon: pTee.teeLon };
       setDriveModal({
-        hole: h,
+        hole: hForP,
         label: players.find((p) => p.id === pid)?.name || "Player",
         shotLabel: "drive",
         onSave: (yd, lat, lng) => {
-          const result = recordStrokeDrive(pid, h, { lat, lon: lng });
+          const result = recordStrokeDrive(pid, hForP, { lat, lon: lng });
           if (pid === mePlayerId) announceShotResult(result, { speakAloud: false });
           setDriveModal(null);
         },
@@ -2711,16 +3035,18 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
     function markNextShotForStroke(pid) {
       const h = activeHole;
       if (!h) return;
+      const pTee = getTeeHole(course, teeIdFor(pid), h.number);
+      const hForP = { ...h, teeLat: pTee.teeLat, teeLon: pTee.teeLon };
       const cell = scores[pid]?.[h.number] || {};
       const extra = cell.extraShots || [];
       const prevPt = extra.length ? extra[extra.length - 1] : cell.driveLat != null ? { lat: cell.driveLat, lon: cell.driveLon } : null;
       setDriveModal({
-        hole: h,
+        hole: hForP,
         label: players.find((p) => p.id === pid)?.name || "Player",
         shotLabel: "next shot",
         fromLat: prevPt?.lat, fromLon: prevPt?.lon,
         onSave: (yd, lat, lng) => {
-          const result = recordStrokeNextShot(pid, h, { lat, lon: lng });
+          const result = recordStrokeNextShot(pid, hForP, { lat, lon: lng });
           if (pid === mePlayerId) announceShotResult(result, { speakAloud: false });
           setDriveModal(null);
         },
@@ -2764,6 +3090,8 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
             distanceUnit={distanceUnit}
             livePos={livePos}
             mePlayer={mePlayer}
+            course={course}
+            teeAssign={teeAssign}
             onScoreField={setScoreField}
             onMarkDrive={markDriveForStroke}
             onMarkNextShot={markNextShotForStroke}
@@ -2822,7 +3150,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
           <div style={{ flex: 1, minWidth: 0 }}>
             <WindIndicator wind={wind} compass={compass} unit={distanceUnit === "m" ? "kmh" : "mph"} />
           </div>
-          <VoiceCaddyButton voiceOn={voiceOn} setVoiceOn={setVoiceOn} voiceMsg={voiceMsg} voiceError={voiceError} mePlayer={mePlayer} wakeWord={voiceWakeWord} />
+          <VoiceCaddyButton voiceOn={voiceOn} setVoiceOn={setVoiceOn} voiceMsg={voiceMsg} voiceError={voiceError} voiceUnmatched={voiceUnmatched} setVoiceUnmatched={setVoiceUnmatched} mePlayer={mePlayer} wakeWord={voiceWakeWord} />
         </div>
         <div style={{ border: `1px solid ${C.line}`, borderRadius: 8, overflow: "hidden" }}>
           {selected.length > 0 && (
@@ -2878,37 +3206,42 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
     setBbState((prev) => ({ ...prev, [teamKey]: { ...prev[teamKey], [holeNumber]: nextState } }));
   }
   function markDriveForBB(teamKey, h, who, currentState, playerName) {
+    const pid = who === "A" ? (teamKey === "team1" ? team1Ids[0] : team2Ids[0]) : (teamKey === "team1" ? team1Ids[1] : team2Ids[1]);
+    // same call-site tee override as stroke play's markDriveForStroke — see that function's comment
+    const pTee = getTeeHole(course, teeIdFor(pid), h.number);
+    const hForP = { ...h, teeLat: pTee.teeLat, teeLon: pTee.teeLon };
     setDriveModal({
-      hole: h,
+      hole: hForP,
       label: playerName || "Player",
       shotLabel: "drive",
       onSave: (yd, lat, lng) => {
-        const result = recordBBDrive(teamKey, who, h, { lat, lon: lng });
-        const pid = who === "A" ? (teamKey === "team1" ? team1Ids[0] : team2Ids[0]) : (teamKey === "team1" ? team1Ids[1] : team2Ids[1]);
+        const result = recordBBDrive(teamKey, who, hForP, { lat, lon: lng });
         if (pid === mePlayerId) announceShotResult(result, { speakAloud: false });
         setDriveModal(null);
       },
     });
   }
   function markNextShotForBB(teamKey, h, who, roundIndex, playerName) {
+    const pid = who === "A" ? (teamKey === "team1" ? team1Ids[0] : team2Ids[0]) : (teamKey === "team1" ? team1Ids[1] : team2Ids[1]);
+    const pTee = getTeeHole(course, teeIdFor(pid), h.number);
+    const hForP = { ...h, teeLat: pTee.teeLat, teeLon: pTee.teeLon };
     const s = bbState[teamKey]?.[h.number] || defaultBBHole();
     const driveLatField = who === "A" ? "driveLatA" : "driveLatB";
     const driveLonField = who === "A" ? "driveLonA" : "driveLonB";
     const anchor = roundIndex === 1
       ? s.rounds[0]?.[driveLatField] != null
         ? { lat: s.rounds[0][driveLatField], lon: s.rounds[0][driveLonField] }
-        : h.teeLat != null ? { lat: h.teeLat, lon: h.teeLon } : null
+        : hForP.teeLat != null ? { lat: hForP.teeLat, lon: hForP.teeLon } : null
       : s.rounds[roundIndex - 1]?.lat != null
       ? { lat: s.rounds[roundIndex - 1].lat, lon: s.rounds[roundIndex - 1].lon }
       : null;
     setDriveModal({
-      hole: h,
+      hole: hForP,
       label: playerName || "Player",
       shotLabel: `shot ${roundIndex + 1}`,
       fromLat: anchor?.lat, fromLon: anchor?.lon,
       onSave: (yd, lat, lng) => {
-        const result = recordBBShotAtRound(teamKey, who, h, roundIndex, { lat, lon: lng });
-        const pid = who === "A" ? (teamKey === "team1" ? team1Ids[0] : team2Ids[0]) : (teamKey === "team1" ? team1Ids[1] : team2Ids[1]);
+        const result = recordBBShotAtRound(teamKey, who, hForP, roundIndex, { lat, lon: lng });
         if (pid === mePlayerId) announceShotResult(result, { speakAloud: false });
         setDriveModal(null);
       },
@@ -2950,6 +3283,8 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
           livePos={livePos}
           mePlayerId={mePlayerId}
           mePlayer={mePlayer}
+          course={course}
+          teeAssign={teeAssign}
           onUpdateTeam1={(s) => updateBB("team1", h.number, s)}
           onUpdateTeam2={(s) => updateBB("team2", h.number, s)}
           onMarkDrive1={(who) => markDriveForBB("team1", h, who, bbState.team1?.[h.number], who === "A" ? pA1?.name : pB1?.name)}
@@ -3003,7 +3338,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
         <div style={{ flex: 1, minWidth: 0 }}>
           <WindIndicator wind={wind} compass={compass} unit={distanceUnit === "m" ? "kmh" : "mph"} />
         </div>
-        <VoiceCaddyButton voiceOn={voiceOn} setVoiceOn={setVoiceOn} voiceMsg={voiceMsg} voiceError={voiceError} mePlayer={mePlayer} wakeWord={voiceWakeWord} />
+        <VoiceCaddyButton voiceOn={voiceOn} setVoiceOn={setVoiceOn} voiceMsg={voiceMsg} voiceError={voiceError} voiceUnmatched={voiceUnmatched} setVoiceUnmatched={setVoiceUnmatched} mePlayer={mePlayer} wakeWord={voiceWakeWord} />
       </div>
       <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, marginBottom: 14 }}>
         {solo ? (
