@@ -728,30 +728,69 @@ function parseOSMHoleElements(data) {
   // golf=tee elements: a node has lat/lon directly; an area (way/multipolygon) is returned as
   // a geometry ring by `out geom`, so its center is approximated as the average of its
   // vertices — plenty precise for "which tee box is this," not meant to be exact-centroid.
-  // `ref=*` is the wiki-documented way to associate a tee marker with its hole number (`name=*`
-  // is explicitly discouraged for this by the wiki); `tee=*` carries the colour/designation.
-  // Only kept when both a hole number and a tee tag are present and real coordinates resolved —
-  // an uncoloured/unnumbered tee marker can't be grouped into a named tee set.
-  const teeBoxes = elements
-    .filter((el) => (el.tags || {}).golf === "tee")
-    .map((el) => {
+  //
+  // REAL-WORLD TAGGING, confirmed 13 Aug by querying two actual mapped courses directly (one a
+  // random well-known course, one the app's own user's course, hand-verified against what he
+  // knew he'd mapped) — both wiki-documented conventions this originally assumed turned out to
+  // not hold in practice:
+  // (1) `ref=*` (the wiki's documented way to associate a tee marker with its hole number) is
+  //     essentially never present on real golf=tee elements, even on richly-mapped courses.
+  //     Every real course checked instead relies on **spatial proximity** — a tee marker simply
+  //     sits near its own hole's start and nowhere near any other hole's. So hole association is
+  //     now done by nearest-hole-by-tee-point matching (`nearestHoleNumber`, below) against the
+  //     golf=hole ways already parsed above, falling back to an explicit `ref` first in case a
+  //     future/other course's mapper *does* tag it (costs nothing to prefer it when present).
+  // (2) `tee=*` is very commonly a **semicolon-separated list**, e.g. `tee=white;blue` — one
+  //     physical tee-box shape shared by two (or three) color markers sitting on the same pad,
+  //     not one color per element. Each color in the list needs its own tee-set entry sharing
+  //     that box's location (and any per-color distance below), not one combined "white;blue"
+  //     pseudo-color (which wouldn't match any preset and would be meaningless to a player).
+  // (3) Some mappers (seen on the course with `source: coct-2015` tags) add authoritative
+  //     `dist:<colour>=<value>` tags with their own real-world-measured yardage for that specific
+  //     color (usually in meters, e.g. `"dist:red":"287meters"`, occasionally missing the unit
+  //     suffix or with a typo like "maters") — strictly better than our own tee-point-to-green
+  //     haversine estimate when present, so it's extracted here and preferred in buildOSMTeeSets.
+  const rawTeeElements = elements.filter((el) => (el.tags || {}).golf === "tee");
+  const teeBoxes = rawTeeElements
+    .flatMap((el) => {
       const tags = el.tags || {};
+      if (!tags.tee) return [];
       const geom = el.geometry || [];
       let lat = el.lat, lon = el.lon;
       if (lat == null && geom.length) {
         lat = geom.reduce((s, p) => s + p.lat, 0) / geom.length;
         lon = geom.reduce((s, p) => s + p.lon, 0) / geom.length;
       }
-      return {
-        number: tags.ref ? Number(tags.ref) : null,
-        color: tags.tee ? String(tags.tee) : null,
-        lat: lat ?? null,
-        lon: lon ?? null,
-      };
-    })
-    .filter((t) => t.number != null && !isNaN(t.number) && t.color && t.lat != null && t.lon != null);
+      if (lat == null || lon == null) return [];
+      const explicitNumber = tags.ref ? Number(tags.ref) : null;
+      const number = explicitNumber != null && !isNaN(explicitNumber) ? explicitNumber : nearestHoleNumber(lat, lon, holes);
+      if (number == null) return [];
+      const colors = String(tags.tee).split(";").map((c) => c.trim()).filter(Boolean);
+      const distKeys = Object.keys(tags).filter((k) => k.toLowerCase().startsWith("dist:"));
+      return colors.map((color) => {
+        const distKey = distKeys.find((k) => k.slice(5).toLowerCase() === color.toLowerCase());
+        const rawDist = distKey ? tags[distKey] : null;
+        const distMeters = rawDist != null ? parseFloat(String(rawDist).replace(/[^0-9.]/g, "")) : NaN;
+        return { number, color, lat, lon, distMeters: isNaN(distMeters) ? null : distMeters };
+      });
+    });
 
   return { holes, teeBoxes };
+}
+
+/* real golf=tee elements essentially never carry a hole-number tag in practice (see the note
+   above parseOSMHoleElements's teeBoxes) — this finds whichever hole's own tee point (already
+   parsed from its golf=hole way, see `holes` above) is physically closest to a tee marker's own
+   position, which is how a human would identify "whose tee box is this" too. Returns null if no
+   hole in this course has a usable tee point to compare against (e.g. no golf=hole ways at all). */
+function nearestHoleNumber(lat, lon, holes) {
+  let best = null, bestDist = Infinity;
+  for (const h of holes) {
+    if (h.teeLat == null || h.teeLon == null) continue;
+    const d = haversineMeters(lat, lon, h.teeLat, h.teeLon);
+    if (d < bestDist) { bestDist = d; best = h.number; }
+  }
+  return best;
 }
 
 /* Groups raw golf=tee markers (see parseOSMHoleElements) into named tee sets — one per
@@ -764,12 +803,12 @@ function parseOSMHoleElements(data) {
    to decide which detected tee, if any, upgrades the primary/default table (see applyOSMHoles). */
 function buildOSMTeeSets(holes, teeBoxes) {
   const holesByNumber = new Map(holes.map((h) => [h.number, h]));
-  const groups = new Map(); // colorKey (lowercased tee=* tag) -> Map(holeNumber -> {lat,lon})
+  const groups = new Map(); // colorKey (lowercased tee=* tag) -> Map(holeNumber -> {lat,lon,distMeters})
   for (const tb of teeBoxes) {
     const key = tb.color.toLowerCase();
     if (!groups.has(key)) groups.set(key, new Map());
     const m = groups.get(key);
-    if (!m.has(tb.number)) m.set(tb.number, { lat: tb.lat, lon: tb.lon });
+    if (!m.has(tb.number)) m.set(tb.number, { lat: tb.lat, lon: tb.lon, distMeters: tb.distMeters });
   }
   const sets = [];
   for (const [colorKey, ptsByHole] of groups) {
@@ -777,9 +816,13 @@ function buildOSMTeeSets(holes, teeBoxes) {
     const holesObj = {};
     for (const [num, pt] of ptsByHole) {
       const baseHole = holesByNumber.get(num);
-      const yardage = baseHole?.greenLat != null
-        ? Math.round(haversineMeters(pt.lat, pt.lon, baseHole.greenLat, baseHole.greenLon) / 0.9144)
-        : null;
+      // prefer a mapper-supplied `dist:<colour>` value (real-world-measured, see
+      // parseOSMHoleElements) over our own tee-point-to-green estimate when present
+      const yardage = pt.distMeters != null
+        ? Math.round(pt.distMeters / 0.9144)
+        : baseHole?.greenLat != null
+          ? Math.round(haversineMeters(pt.lat, pt.lon, baseHole.greenLat, baseHole.greenLon) / 0.9144)
+          : null;
       holesObj[num] = { yardage, teeLat: pt.lat, teeLon: pt.lon };
     }
     sets.push({ colorKey, name: info.name, color: info.color, holeCount: ptsByHole.size, holes: holesObj });
@@ -1584,11 +1627,17 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
       setPrimaryFromOSM(!!primarySet);
       applyOSMTeeSets(teeSets, primaryKey);
 
+      // most real-world OpenStreetMap golf mapping only draws tee-box shapes without ever
+      // filling in the `tee=<colour>`/`ref=<hole>` tags this detection needs (confirmed by
+      // checking several real, well-mapped courses live — bare `golf=tee` with no colour/ref
+      // is the common case, not an edge case) — so finding 0 colors here is normal and expected
+      // for most courses, not a sign anything is broken. Said explicitly so it doesn't read as
+      // silent failure the way it did before this note existed.
       const teeNote = (teeSets || []).length
         ? ` — detected ${teeSets.length} tee color${teeSets.length !== 1 ? "s" : ""} on OpenStreetMap (${teeSets.map((s) => s.name).join(", ")})${
             primarySet ? "" : `; none matched the "${teeColor}" primary tee above, so the par/distance table still uses the course's general hole line — the detected colors are all listed as extra tees below`
           }; see the Tee boxes section below`
-        : "";
+        : " — no colour-coded tee boxes found on OpenStreetMap for this course (most courses aren't mapped to that level of detail); if you know the different tee distances, add them below with \"+ Add another tee box\"";
 
       setNumHoles(total);
       setHoles(newHoles);
