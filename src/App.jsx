@@ -681,8 +681,18 @@ function holeCompleteness(h) {
   return [h.par, h.strokeIndex, h.yardageMeters, h.teeLat, h.greenLat].filter((v) => v != null).length;
 }
 
+/* Splits the raw Overpass response into (1) `golf=hole` ways — the existing per-hole
+   par/distance/tee-green geometry — and (2) `golf=tee` points/areas — individual tee-box
+   markers, some of which OpenStreetMap mappers colour-tag via `tee=<colour>` (e.g. `tee=red`;
+   see the OSM wiki's Tag:golf=tee page) to indicate which physical tee-box that marker is.
+   `api/osm-holes.js` fetches both kinds of element in the same query (13 Aug, tee-box
+   OSM-detection round) — this function is what actually tells them apart, since both element
+   kinds mix together in one flat `elements` array. */
 function parseOSMHoleElements(data) {
-  const parsed = (data.elements || [])
+  const elements = data.elements || [];
+
+  const holeWays = elements.filter((el) => (el.tags || {}).golf === "hole");
+  const parsed = holeWays
     .map((el) => {
       const tags = el.tags || {};
       const geom = el.geometry || [];
@@ -713,7 +723,69 @@ function parseOSMHoleElements(data) {
     const existing = byNumber.get(h.number);
     if (!existing || holeCompleteness(h) > holeCompleteness(existing)) byNumber.set(h.number, h);
   }
-  return [...byNumber.values()].sort((a, b) => a.number - b.number);
+  const holes = [...byNumber.values()].sort((a, b) => a.number - b.number);
+
+  // golf=tee elements: a node has lat/lon directly; an area (way/multipolygon) is returned as
+  // a geometry ring by `out geom`, so its center is approximated as the average of its
+  // vertices — plenty precise for "which tee box is this," not meant to be exact-centroid.
+  // `ref=*` is the wiki-documented way to associate a tee marker with its hole number (`name=*`
+  // is explicitly discouraged for this by the wiki); `tee=*` carries the colour/designation.
+  // Only kept when both a hole number and a tee tag are present and real coordinates resolved —
+  // an uncoloured/unnumbered tee marker can't be grouped into a named tee set.
+  const teeBoxes = elements
+    .filter((el) => (el.tags || {}).golf === "tee")
+    .map((el) => {
+      const tags = el.tags || {};
+      const geom = el.geometry || [];
+      let lat = el.lat, lon = el.lon;
+      if (lat == null && geom.length) {
+        lat = geom.reduce((s, p) => s + p.lat, 0) / geom.length;
+        lon = geom.reduce((s, p) => s + p.lon, 0) / geom.length;
+      }
+      return {
+        number: tags.ref ? Number(tags.ref) : null,
+        color: tags.tee ? String(tags.tee) : null,
+        lat: lat ?? null,
+        lon: lon ?? null,
+      };
+    })
+    .filter((t) => t.number != null && !isNaN(t.number) && t.color && t.lat != null && t.lon != null);
+
+  return { holes, teeBoxes };
+}
+
+/* Groups raw golf=tee markers (see parseOSMHoleElements) into named tee sets — one per
+   distinct `tee=*` tag value found, each carrying its own per-hole yardage (computed from that
+   specific tee marker's real GPS position to the hole's green, not approximated from the
+   golf=hole way) and the marker's own coordinates for live GPS use. A color/designation only
+   showing up on some holes is fine — getTeeHole() already falls back to the course's base hole
+   data for any hole a given tee set doesn't cover (e.g. partial mapping coverage). Sorted by
+   how many holes each tee actually covers (most-complete first) — CoursesTab uses this order
+   to decide which detected tee, if any, upgrades the primary/default table (see applyOSMHoles). */
+function buildOSMTeeSets(holes, teeBoxes) {
+  const holesByNumber = new Map(holes.map((h) => [h.number, h]));
+  const groups = new Map(); // colorKey (lowercased tee=* tag) -> Map(holeNumber -> {lat,lon})
+  for (const tb of teeBoxes) {
+    const key = tb.color.toLowerCase();
+    if (!groups.has(key)) groups.set(key, new Map());
+    const m = groups.get(key);
+    if (!m.has(tb.number)) m.set(tb.number, { lat: tb.lat, lon: tb.lon });
+  }
+  const sets = [];
+  for (const [colorKey, ptsByHole] of groups) {
+    const info = resolveTeeColor(colorKey);
+    const holesObj = {};
+    for (const [num, pt] of ptsByHole) {
+      const baseHole = holesByNumber.get(num);
+      const yardage = baseHole?.greenLat != null
+        ? Math.round(haversineMeters(pt.lat, pt.lon, baseHole.greenLat, baseHole.greenLon) / 0.9144)
+        : null;
+      holesObj[num] = { yardage, teeLat: pt.lat, teeLon: pt.lon };
+    }
+    sets.push({ colorKey, name: info.name, color: info.color, holeCount: ptsByHole.size, holes: holesObj });
+  }
+  sets.sort((a, b) => b.holeCount - a.holeCount || a.name.localeCompare(b.name));
+  return sets;
 }
 
 /* throws (rather than silently returning []) when the lookup fails, so the caller can
@@ -726,7 +798,7 @@ function parseOSMHoleElements(data) {
    bounding box, which otherwise can sweep in a nearby course's holes (see api/osm-holes.js). */
 async function fetchOSMHoles(candidate) {
   const boundingbox = candidate?.boundingbox;
-  if (!boundingbox && !(candidate?.osmType && candidate?.osmId != null)) return [];
+  if (!boundingbox && !(candidate?.osmType && candidate?.osmId != null)) return { holes: [], teeSets: [] };
   const params = new URLSearchParams();
   if (candidate?.osmType && candidate?.osmId != null) {
     params.set("osmType", candidate.osmType);
@@ -748,7 +820,9 @@ async function fetchOSMHoles(candidate) {
       throw new Error(`Hole lookup failed${detail || `: ${res.status}`}`);
     }
     const data = await res.json();
-    return parseOSMHoleElements(data);
+    const { holes, teeBoxes } = parseOSMHoleElements(data);
+    const teeSets = buildOSMTeeSets(holes, teeBoxes);
+    return { holes, teeSets };
   } catch (e) {
     const err = new Error("Hole lookup failed");
     err.cause = e;
@@ -792,17 +866,39 @@ function parTotal(course) {
    rating/slope) on the same course — this lets each player in a round pick which tees they're
    playing, rather than the whole group being locked to one shared yardage table.
 
-   Standard 5-color preset list, per the user's choice — a course's `tees` array picks from
-   these names but stores its own color/rating/slope/per-hole yardage, so this is just the
+   Preset color list, per the user's choice — a course's `tees` array picks from these names
+   but stores its own color/rating/slope/per-hole yardage, so this is just the manual-entry
    dropdown's option list, not a fixed schema. Gold/Red reuse the app's existing brass/flag
-   colors so they stay within the established palette rather than introducing new ones. */
+   colors so they stay within the established palette rather than introducing new ones.
+   Extended (13 Aug, tee-box OSM-detection round) beyond the original 5 so that a color OSM
+   actually reports (see `resolveTeeColor` below) almost always has a matching preset — avoids
+   a mismatched/blank primary-tee dropdown when OpenStreetMap's own `tee=<colour>` tagging uses
+   a color outside the original Black/Blue/White/Gold/Red set. */
 const TEE_PRESETS = [
   { name: "Black", color: "#1A1A1A" },
   { name: "Blue", color: "#2C5AA0" },
   { name: "White", color: "#FBF9F2" },
   { name: "Gold", color: "#A98B4F" },
   { name: "Red", color: "#B23A2E" },
+  { name: "Yellow", color: "#D9B44A" },
+  { name: "Green", color: "#3C7A45" },
+  { name: "Silver", color: "#B8B8B8" },
+  { name: "Orange", color: "#CC6A2C" },
 ];
+
+/* Resolves an OpenStreetMap `tee=*` tag value (e.g. "red", "championship") to a display
+   name + color — matches a known preset case-insensitively where possible (covers the
+   overwhelming majority of real-world tags: red/white/blue/black/gold/yellow/green/silver/
+   orange), and falls back to title-casing the raw tag with a neutral grey for anything else
+   (e.g. "championship", "members") so unusual-but-real tagging still shows up as a usable,
+   distinctly-labeled tee rather than being silently dropped. */
+function resolveTeeColor(rawTag) {
+  const key = String(rawTag || "").trim().toLowerCase();
+  const preset = TEE_PRESETS.find((p) => p.name.toLowerCase() === key);
+  if (preset) return preset;
+  const name = key.replace(/\b\w/g, (c) => c.toUpperCase());
+  return { name, color: "#8A8A8A" };
+}
 
 /* Courses created before this feature (or never given an explicit tee box) have no `tees`
    array at all — rather than migrating every stored course, this synthesizes a single
@@ -1315,11 +1411,14 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
   const [numHoles, setNumHoles] = useState(18);
   const [rating, setRating] = useState("");
   const [slope, setSlope] = useState("");
-  /* tee-box colors (13 Aug feature) — the holes table above always describes the "primary" tee
-     (teeColor, defaulting to White); additional tee boxes are optional and only need par/color/
-     rating/slope/per-hole yardage — GPS pins aren't collected per-tee here (that data essentially
-     never exists outside a single OpenStreetMap-mapped tee location), so every tee shares the
-     primary tee's teeLat/teeLon via getTeeHole's fallback. */
+  /* tee-box colors (13 Aug feature, extended same day once OSM tee-box detection was added) —
+     the holes table above always describes the "primary" tee (teeColor, defaulting to White);
+     additional tee boxes are optional, entered manually (par/color/rating/slope/per-hole
+     yardage, no GPS — see addExtraTee) OR auto-populated from OpenStreetMap's own colour-tagged
+     `golf=tee` markers when a course has them (see applyOSMTeeSets below), in which case they
+     DO carry real per-tee GPS via each extra tee's `teeLatLon` map (`fromOSM: true` marks
+     these). A manually-added extra tee has no `teeLatLon`, so getTeeHole() falls back to the
+     primary tee's shared location for it, same as before. */
   const [teeColor, setTeeColor] = useState("White");
   const [extraTees, setExtraTees] = useState([]);
   const [manualLat, setManualLat] = useState("");
@@ -1338,8 +1437,8 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
   const [showManualHelpers, setShowManualHelpers] = useState(false);
   const [nearbyLoading, setNearbyLoading] = useState(false);
 
-  function cacheOSMHoles(key, holes) {
-    const entry = { holes, cachedAt: Date.now() };
+  function cacheOSMHoles(key, holes, teeSets) {
+    const entry = { holes, teeSets: teeSets || [], cachedAt: Date.now() };
     const next = { ...osmCache, [key]: entry };
     setOsmCache(next);
     saveOSMCache(next);
@@ -1404,14 +1503,17 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
     const key = osmCacheKey(candidate);
     const cached = osmCache[key];
     if (cached) {
-      applyOSMHoles(cached.holes, cached.cachedAt);
+      // older cache entries (saved before the 13 Aug tee-box detection round) have no
+      // `teeSets` field at all — applyOSMHoles treats that the same as "none found", so a
+      // course cached before this feature simply won't show tee colors until a Refresh
+      applyOSMHoles(cached.holes, cached.teeSets, cached.cachedAt);
       setOsmLoading(false);
       return;
     }
     try {
-      const osmHoles = await fetchOSMHoles(candidate);
-      cacheOSMHoles(key, osmHoles); // cache successes AND genuine zero-result answers — never cache a failure
-      applyOSMHoles(osmHoles, null);
+      const { holes: osmHoles, teeSets } = await fetchOSMHoles(candidate);
+      cacheOSMHoles(key, osmHoles, teeSets); // cache successes AND genuine zero-result answers — never cache a failure
+      applyOSMHoles(osmHoles, teeSets, null);
     } catch (e) {
       // fetchOSMHoles throws only when every Overpass mirror failed (timeout/rate-limit/network) —
       // that's a temporary service problem, not "this course has no holes", so say so and offer a retry
@@ -1421,7 +1523,21 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
     setOsmLoading(false);
   }
 
-  function applyOSMHoles(osmHoles, cachedAt) {
+  /* builds course.tees-shaped extra-tee entries (see saveCourse) from OSM-detected tee sets —
+     everything EXCEPT whichever detected color matches the current primary teeColor (that one
+     instead upgrades the primary holes table in-place, see applyOSMHoles below), so a course's
+     "White"/primary tee never shows up twice. */
+  function applyOSMTeeSets(teeSets, primaryColorKey) {
+    const others = (teeSets || []).filter((s) => s.colorKey !== primaryColorKey);
+    setExtraTees(others.map((s) => ({
+      id: uid(), name: s.name, color: s.color, rating: "", slope: "",
+      yardages: Object.fromEntries(Object.entries(s.holes).map(([num, h]) => [num, h.yardage ? String(h.yardage) : ""])),
+      teeLatLon: Object.fromEntries(Object.entries(s.holes).map(([num, h]) => [num, { lat: h.teeLat, lon: h.teeLon }])),
+      fromOSM: true,
+    })));
+  }
+
+  function applyOSMHoles(osmHoles, teeSets, cachedAt) {
     setOsmFromCache(cachedAt != null);
     const cacheNote = cachedAt != null ? ` (loaded from local cache, last checked ${new Date(cachedAt).toLocaleDateString()} — tap Refresh below to re-check OpenStreetMap)` : "";
     if (osmHoles.length > 0) {
@@ -1442,10 +1558,37 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
         };
       });
       const gpsCount = osmHoles.filter((h) => h.greenLat != null).length;
+
+      // if OSM's own colour-tagged tee markers (see api/osm-holes.js / buildOSMTeeSets) include
+      // a set matching the CURRENT primary tee color (teeColor, default "White"), use its real
+      // per-tee GPS/yardage to upgrade the primary table's numbers in place — strictly more
+      // accurate than the golf=hole-way-vertex fallback above, and it's the same tee either way
+      // so this doesn't change what "the primary tee" means, just how precisely it's measured.
+      const primaryKey = teeColor.trim().toLowerCase();
+      const primarySet = (teeSets || []).find((s) => s.colorKey === primaryKey);
+      if (primarySet) {
+        newHoles.forEach((h) => {
+          const override = primarySet.holes[h.number];
+          if (override) {
+            if (override.yardage != null) h.yardage = override.yardage;
+            h.teeLat = override.teeLat;
+            h.teeLon = override.teeLon;
+          }
+        });
+      }
+      applyOSMTeeSets(teeSets, primaryKey);
+
+      const teeNote = (teeSets || []).length
+        ? ` — detected ${teeSets.length} tee color${teeSets.length !== 1 ? "s" : ""} on OpenStreetMap (${teeSets.map((s) => s.name).join(", ")})${
+            primarySet ? "" : `; none matched the "${teeColor}" primary tee above, so the par/distance table still uses the course's general hole line — the detected colors are all listed as extra tees below`
+          }; see the Tee boxes section below`
+        : "";
+
       setNumHoles(total);
       setHoles(newHoles);
-      setOsmStatus(`Found ${osmHoles.length} hole${osmHoles.length !== 1 ? "s" : ""} mapped on OpenStreetMap (${gpsCount} with tee/green GPS for live distance)${cacheNote} — review par/distance below before saving.`);
+      setOsmStatus(`Found ${osmHoles.length} hole${osmHoles.length !== 1 ? "s" : ""} mapped on OpenStreetMap (${gpsCount} with tee/green GPS for live distance)${cacheNote}${teeNote} — review par/distance below before saving.`);
     } else {
+      setExtraTees([]);
       setOsmStatus(`Location set from OpenStreetMap, but no hole-by-hole data is mapped for this course yet${cacheNote} — enter holes manually below.`);
     }
   }
@@ -1459,9 +1602,9 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
     setOsmFromCache(false);
     setOsmStatus("Checking OpenStreetMap…");
     try {
-      const osmHoles = await fetchOSMHoles(lastOSMCandidate);
-      cacheOSMHoles(osmCacheKey(lastOSMCandidate), osmHoles);
-      applyOSMHoles(osmHoles, null);
+      const { holes: osmHoles, teeSets } = await fetchOSMHoles(lastOSMCandidate);
+      cacheOSMHoles(osmCacheKey(lastOSMCandidate), osmHoles, teeSets);
+      applyOSMHoles(osmHoles, teeSets, null);
     } catch (e) {
       setOsmFailed(true);
       setOsmStatus("Still rejecting requests across all 3 mirrors — the public Overpass service is under heavy load right now (a known, current issue, unrelated to this app). The course location is saved either way; enter holes manually below, or try again in a few minutes.");
@@ -1540,9 +1683,12 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
         const teeHoles = {};
         holes.forEach((h) => {
           const yd = t.yardages[h.number];
-          // extra tees don't collect their own GPS pin (see the note above addExtraTee) — leave
-          // teeLat/teeLon unset so getTeeHole() falls back to the primary tee's location
-          teeHoles[h.number] = { yardage: yd ? Number(yd) : null, teeLat: null, teeLon: null };
+          // manually-added extra tees (no `teeLatLon` — see addExtraTee) don't collect their
+          // own GPS pin, so teeLat/teeLon stays unset and getTeeHole() falls back to the
+          // primary tee's location for them; OSM-detected extra tees (fromOSM: true, populated
+          // by applyOSMTeeSets) carry a real per-hole GPS point in `teeLatLon`, used here as-is
+          const gps = t.teeLatLon?.[h.number];
+          teeHoles[h.number] = { yardage: yd ? Number(yd) : null, teeLat: gps?.lat ?? null, teeLon: gps?.lon ?? null };
         });
         return {
           id: t.id, name: t.name, color: t.color,
@@ -1719,14 +1865,22 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
                   <span style={{ width: 10, height: 10, borderRadius: "50%", display: "inline-block", background: t.color, border: `1px solid ${C.line}`, flexShrink: 0 }} />
                   <select style={selectStyle} value={t.name} onChange={(e) => updateExtraTee(i, "name", e.target.value)}>
+                    {TEE_PRESETS.some((p) => p.name === t.name) ? null : <option value={t.name}>{t.name}</option>}
                     {TEE_PRESETS.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
                   </select>
+                  {t.fromOSM && (
+                    <span title="Detected from a colour-tagged tee marker on OpenStreetMap — includes real GPS for this tee"
+                      style={{ fontFamily: sans, fontSize: 10, color: C.fairway, border: `1px solid ${C.fairway}`, borderRadius: 4, padding: "2px 5px" }}>
+                      📍 OSM
+                    </span>
+                  )}
                   <input style={{ ...inputStyle, width: 80 }} placeholder="Rating" value={t.rating} onChange={(e) => updateExtraTee(i, "rating", e.target.value)} />
                   <input style={{ ...inputStyle, width: 70 }} placeholder="Slope" value={t.slope} onChange={(e) => updateExtraTee(i, "slope", e.target.value)} />
                   <button style={{ ...btnDanger, marginLeft: "auto" }} onClick={() => removeExtraTee(i)}>Remove</button>
                 </div>
                 <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, marginBottom: 6 }}>
                   Distance per hole ({distanceUnit === "m" ? "m" : "yd"}) — par and stroke index come from the table above
+                  {t.fromOSM ? "; yardages pre-filled from OpenStreetMap, editable if needed" : ""}
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(58px, 1fr))", gap: 6 }}>
                   {holes.map((h) => (

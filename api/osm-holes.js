@@ -19,6 +19,14 @@
 // as a course reporting double (or a handful extra) the holes it actually has. Falls back to
 // the bounding-box query when no osmType/osmId is given, or the course is only a bare node
 // (no area to restrict to).
+//
+// Also fetches `golf=tee` elements (nodes and small areas) alongside `golf=hole` ways (13 Aug,
+// tee-box color-detection round) — some OpenStreetMap mappers place one tee marker per physical
+// tee box per hole, colour-tagged via `tee=<colour>` (e.g. `tee=red`; see the OSM wiki's
+// Tag:golf=tee page). The client (parseOSMHoleElements/buildOSMTeeSets in App.jsx) groups these
+// by color into named tee sets with real per-tee GPS and yardage. Not every course has this
+// level of detail mapped — most only have the single golf=hole line this app already used —
+// so an empty teeBoxes result is the common case, not a bug.
 
 const OVERPASS_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
@@ -64,7 +72,7 @@ export default async function handler(req, res) {
   const bboxQuery = hasBbox
     ? (() => {
         const [south, north, west, east] = bboxNums;
-        return `[out:json][timeout:25];(way["golf"="hole"](${south},${west},${north},${east}););out geom;`;
+        return `[out:json][timeout:25];(way["golf"="hole"](${south},${west},${north},${east});node["golf"="tee"](${south},${west},${north},${east});way["golf"="tee"](${south},${west},${north},${east}););out geom;`;
       })()
     : null;
 
@@ -75,7 +83,7 @@ export default async function handler(req, res) {
 
   if (hasArea) {
     const ref = osmType === "way" ? `way(${osmId})` : `relation(${osmId})`;
-    const areaQuery = `[out:json][timeout:25];${ref};map_to_area->.a;way["golf"="hole"](area.a);out geom;`;
+    const areaQuery = `[out:json][timeout:25];${ref};map_to_area->.a;(way["golf"="hole"](area.a);node["golf"="tee"](area.a);way["golf"="tee"](area.a););out geom;`;
     const areaResult = await runQuery(areaQuery);
     if (areaResult.data && (areaResult.data.elements || []).length > 0) {
       res.status(200).json(areaResult.data);
