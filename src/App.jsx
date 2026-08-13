@@ -1421,6 +1421,11 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
      primary tee's shared location for it, same as before. */
   const [teeColor, setTeeColor] = useState("White");
   const [extraTees, setExtraTees] = useState([]);
+  /* whether the CURRENT primary tee's yardage/GPS numbers came from a matched OSM tee set (see
+     applyOSMHoles) — carried along so that if the primary is later swapped out via
+     handleTeeColorChange, the demoted tee's "📍 OSM" badge (see extraTees.map render) stays
+     accurate instead of always reading as manually-entered. */
+  const [primaryFromOSM, setPrimaryFromOSM] = useState(false);
   const [manualLat, setManualLat] = useState("");
   const [manualLon, setManualLon] = useState("");
   const [holes, setHoles] = useState(
@@ -1576,6 +1581,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
           }
         });
       }
+      setPrimaryFromOSM(!!primarySet);
       applyOSMTeeSets(teeSets, primaryKey);
 
       const teeNote = (teeSets || []).length
@@ -1589,8 +1595,51 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
       setOsmStatus(`Found ${osmHoles.length} hole${osmHoles.length !== 1 ? "s" : ""} mapped on OpenStreetMap (${gpsCount} with tee/green GPS for live distance)${cacheNote}${teeNote} — review par/distance below before saving.`);
     } else {
       setExtraTees([]);
+      setPrimaryFromOSM(false);
       setOsmStatus(`Location set from OpenStreetMap, but no hole-by-hole data is mapped for this course yet${cacheNote} — enter holes manually below.`);
     }
+  }
+
+  /* fires when the "par/distance table above is from the ___ tees" dropdown changes. Simply
+     relabeling teeColor (the old behavior) left the table showing stale numbers from whatever
+     tee was primary at OSM-fetch time — reported by the user as "the yardages don't change when
+     I select a tee box color, so I have no way of knowing if it finds the different color tee
+     boxes." Fix: if the newly-picked color already has data sitting in extraTees (whether
+     OSM-detected or manually entered), swap it into the primary table/rating/slope right now,
+     and demote the outgoing primary's data into its place in extraTees — so no data is ever
+     lost, and the table always reflects whichever tee is currently selected as primary. If the
+     newly-picked color has no known data yet, this is just the plain manual-entry case (e.g.
+     switching the label before ever filling anything in) — behaves exactly as before: relabel
+     only, nothing to swap. */
+  function handleTeeColorChange(newColor) {
+    if (newColor === teeColor) return;
+    const match = extraTees.find((t) => t.name === newColor);
+    if (!match) { setTeeColor(newColor); return; }
+    const oldPreset = TEE_PRESETS.find((p) => p.name === teeColor);
+    const demoted = {
+      id: uid(),
+      name: teeColor,
+      color: oldPreset?.color || C.turf,
+      rating, slope,
+      yardages: Object.fromEntries(holes.map((h) => [h.number, h.yardage !== "" && h.yardage != null ? String(h.yardage) : ""])),
+      teeLatLon: Object.fromEntries(holes.map((h) => [h.number, { lat: h.teeLat, lon: h.teeLon }])),
+      fromOSM: primaryFromOSM,
+    };
+    setHoles(holes.map((h) => {
+      const y = match.yardages[h.number];
+      const gps = match.teeLatLon?.[h.number];
+      return {
+        ...h,
+        yardage: y !== undefined && y !== "" ? Number(y) : h.yardage,
+        teeLat: gps ? gps.lat : h.teeLat,
+        teeLon: gps ? gps.lon : h.teeLon,
+      };
+    }));
+    setRating(match.rating || "");
+    setSlope(match.slope || "");
+    setPrimaryFromOSM(!!match.fromOSM);
+    setExtraTees([...extraTees.filter((t) => t.id !== match.id), demoted]);
+    setTeeColor(newColor);
   }
 
   /* always bypasses the cache — used both to retry after a failure and to force-refresh a
@@ -1616,7 +1665,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
     setName(""); setNumHoles(18); setRating(""); setSlope(""); setManualLat(""); setManualLon("");
     setHoles(Array.from({ length: 18 }, (_, i) => ({ number: i + 1, par: 4, yardage: "", strokeIndex: "", teeLat: null, teeLon: null, greenLat: null, greenLon: null })));
     setOsmQuery(""); setOsmResults([]); setOsmStatus(""); setOsmFailed(false); setLastOSMCandidate(null); setOsmFromCache(false);
-    setTeeColor("White"); setExtraTees([]);
+    setTeeColor("White"); setExtraTees([]); setPrimaryFromOSM(false);
     setAdding(false);
   }
   function updateHoleCount(n) {
@@ -1854,7 +1903,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
               <span style={{ width: 10, height: 10, borderRadius: "50%", display: "inline-block", background: TEE_PRESETS.find((p) => p.name === teeColor)?.color, border: `1px solid ${C.line}`, flexShrink: 0 }} />
               <span style={{ fontFamily: sans, fontSize: 12, color: C.turf }}>The par/distance table above is from the</span>
-              <select style={selectStyle} value={teeColor} onChange={(e) => setTeeColor(e.target.value)}>
+              <select style={selectStyle} value={teeColor} onChange={(e) => handleTeeColorChange(e.target.value)}>
                 {TEE_PRESETS.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
               </select>
               <span style={{ fontFamily: sans, fontSize: 12, color: C.turf }}>tees</span>
@@ -3156,6 +3205,9 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
         )}
         {format === "betterball" && selected.length > 0 && !isTwoBall && !isFourBall && (
           <div style={{ fontFamily: sans, fontSize: 12, color: C.flag, marginBottom: 10 }}>Better ball needs exactly 2 or 4 players — pick a different count or switch to stroke play.</div>
+        )}
+        {selected.length === 0 && (
+          <div style={{ fontFamily: sans, fontSize: 12, color: C.flag, marginBottom: 10 }}>Select at least one player above to start.</div>
         )}
         <button style={btnPrimary} disabled={selected.length === 0 || !teamsReady} onClick={beginRound}>Start round →</button>
       </div>

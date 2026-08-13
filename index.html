@@ -4,6 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
     <title>Linksman — Golf Scorer</title>
+    <!-- Every button in the app (btnPrimary/btnGhost in App.jsx) sets cursor:"pointer"
+         unconditionally, including when the `disabled` attribute is set — so a disabled button
+         previously looked and felt exactly like a clickable one (no dimming, still a pointer
+         cursor), and clicking it silently did nothing. This is the confirmed root cause of a
+         reported "Start round button does absolutely nothing" bug: the button was disabled
+         (e.g. zero players selected, or a four-ball round missing team assignments) but gave no
+         visual signal of that. One global rule fixes every disabled button in the app at once,
+         rather than patching each button's inline style individually. -->
+    <style>
+      button:disabled { opacity: 0.45; cursor: not-allowed !important; }
+    </style>
   </head>
   <body>
     <div id="root"></div>
