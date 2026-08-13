@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef, useId } from "react";
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from "recharts";
 import { MapContainer, TileLayer, Marker, CircleMarker, useMapEvents } from "react-leaflet";
 import L from "leaflet";
@@ -566,34 +566,66 @@ function useWindData(lat, lon, unit) {
    physical compass does — a fixed triangle at the top marks "the way your phone is pointing."
    The arrow is drawn pointing DOWNWIND (the direction the wind is blowing TOWARD, wind-sock/
    flag style — how golfers already read wind on a course) rather than the meteorological
-   "from" direction used in the text label next to it. */
+   "from" direction used in the text label next to it.
+   Redesigned smaller and more minimal (13 Aug, at the user's request after a real round) — the
+   N/E/S/W letters are gone (replaced by short tick marks, which don't need the extra radius
+   text legibility required, letting the whole dial shrink) and the face/arrow use gradients
+   plus a drop-shadow filter for a subtle raised "3D" look instead of a flat 2D pointer, while
+   keeping the exact same live-rotation behavior that made the original version clear to read. */
 function WindDial({ windDirection, heading, hasCompass, size }) {
   const r = size / 2;
   const toward = windDirection != null ? (windDirection + 180) % 360 : null;
   const roseRotation = hasCompass ? -heading : 0;
+  const uid = useId();
+  const faceGrad = `wind-face-${uid}`, arrowGrad = `wind-arrow-${uid}`, arrowShadow = `wind-shadow-${uid}`;
   return (
     <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ flexShrink: 0 }}>
+      <defs>
+        {/* subtle dome/bevel on the face — lighter at top-left, darker at bottom-right */}
+        <radialGradient id={faceGrad} cx="35%" cy="30%" r="75%">
+          <stop offset="0%" stopColor={C.white} />
+          <stop offset="100%" stopColor={C.paper2} />
+        </radialGradient>
+        {/* glossy fill on the arrow itself, brightest near the tip */}
+        <linearGradient id={arrowGrad} x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stopColor="#D65A4C" />
+          <stop offset="100%" stopColor={C.flag} />
+        </linearGradient>
+        <filter id={arrowShadow} x="-50%" y="-50%" width="200%" height="200%">
+          <feDropShadow dx="0" dy="1" stdDeviation="1" floodColor={C.fairwayDark} floodOpacity="0.35" />
+        </filter>
+      </defs>
       <g style={{ transform: `rotate(${roseRotation}deg)`, transformOrigin: `${r}px ${r}px`, transition: "transform 0.15s linear" }}>
-        <circle cx={r} cy={r} r={r - 2} fill={C.white} stroke={C.fairway} strokeWidth={1.5} />
-        {[["N", 0], ["E", 90], ["S", 180], ["W", 270]].map(([label, deg]) => {
+        <circle cx={r} cy={r} r={r - 2} fill={`url(#${faceGrad})`} stroke={C.fairway} strokeWidth={1.25} />
+        {/* short reference ticks at N/E/S/W stand in for the old letter labels — same four
+            reference points, no text-legibility radius required, so the dial can be smaller */}
+        {[0, 90, 180, 270].map((deg) => {
           const rad = (deg * Math.PI) / 180;
-          const lx = r + Math.sin(rad) * (r - 11);
-          const ly = r - Math.cos(rad) * (r - 11);
+          const outer = r - 2.5, inner = deg === 0 ? r - 7 : r - 5.5;
           return (
-            <text key={label} x={lx} y={ly} textAnchor="middle" dominantBaseline="middle" fontSize={9} fontWeight={700} fill={C.turf} fontFamily={sans}>
-              {label}
-            </text>
+            <line
+              key={deg}
+              x1={r + Math.sin(rad) * inner} y1={r - Math.cos(rad) * inner}
+              x2={r + Math.sin(rad) * outer} y2={r - Math.cos(rad) * outer}
+              stroke={C.turf} strokeWidth={deg === 0 ? 1.75 : 1.25} strokeLinecap="round"
+            />
           );
         })}
         {toward != null && (
-          <g style={{ transform: `rotate(${toward}deg)`, transformOrigin: `${r}px ${r}px` }}>
-            <line x1={r} y1={r} x2={r} y2={r * 0.32} stroke={C.flag} strokeWidth={2.5} strokeLinecap="round" />
-            <polygon points={`${r - 5},${r * 0.32 + 6} ${r + 5},${r * 0.32 + 6} ${r},${r * 0.32 - 5}`} fill={C.flag} />
+          <g style={{ transform: `rotate(${toward}deg)`, transformOrigin: `${r}px ${r}px` }} filter={`url(#${arrowShadow})`}>
+            {/* solid gradient-filled needle, center out to the tip — a triangular head tapering
+                into a narrow shaft, rather than the old thin stroked line + separate polygon */}
+            <path
+              d={`M ${r} ${r * 0.22}
+                  L ${r + r * 0.17} ${r * 0.58} L ${r + r * 0.055} ${r * 0.58} L ${r + r * 0.055} ${r}
+                  L ${r - r * 0.055} ${r} L ${r - r * 0.055} ${r * 0.58} L ${r - r * 0.17} ${r * 0.58} Z`}
+              fill={`url(#${arrowGrad})`}
+            />
           </g>
         )}
-        <circle cx={r} cy={r} r={2.5} fill={C.fairway} />
+        <circle cx={r} cy={r} r={2} fill={C.fairway} />
       </g>
-      <polygon points={`${r - 4},3 ${r + 4},3 ${r},10`} fill={C.ink} />
+      <polygon points={`${r - 3.5},2 ${r + 3.5},2 ${r},8`} fill={C.ink} />
     </svg>
   );
 }
@@ -607,8 +639,11 @@ function WindIndicator({ wind, compass, unit }) {
   const unitLabel = unit === "kmh" ? "km/h" : "mph";
   const hasCompass = compass.heading != null;
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 12, border: `1px solid ${C.line}`, borderRadius: 8, padding: "8px 12px", background: C.white, width: "100%", boxSizing: "border-box" }}>
-      <WindDial windDirection={wind.direction} heading={compass.heading || 0} hasCompass={hasCompass} size={60} />
+    <div style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.line}`, borderRadius: 8, padding: "8px 10px", background: C.white, width: "100%", boxSizing: "border-box" }}>
+      {/* dial shrunk from 60→44px (13 Aug) — the redesigned arrow/ticks (see WindDial) don't
+          need the old letter-label radius, so the panel reads just as clearly at this size
+          while taking noticeably less vertical room */}
+      <WindDial windDirection={wind.direction} heading={compass.heading || 0} hasCompass={hasCompass} size={44} />
       <div style={{ flex: 1, minWidth: 0, fontFamily: sans }}>
         <div style={{ fontSize: 15, fontWeight: 700, color: C.ink }}>
           {Math.round(wind.speed)} {unitLabel}
@@ -931,24 +966,47 @@ function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, d
   );
 }
 
+/* minimalist silhouette mic icon (capsule + stand + base) — replaces the old 🎙️ emoji glyph,
+   which also sidesteps the emoji-glyph-height cross-device inconsistency documented on
+   headerActionBtnStyle's old comment, since an SVG renders at an exact, consistent size. */
+function MicIcon({ size = 18, color }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0 }}>
+      <rect x="9" y="2" width="6" height="12" rx="3" fill={color} />
+      <path d="M5 11a7 7 0 0 0 14 0" stroke={color} strokeWidth="2" strokeLinecap="round" fill="none" />
+      <line x1="12" y1="18" x2="12" y2="21.5" stroke={color} strokeWidth="2" strokeLinecap="round" />
+      <line x1="8" y1="21.5" x2="16" y2="21.5" stroke={color} strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/* redesigned 13 Aug, at the user's request: a minimalist mic silhouette with the configured
+   caddy wake-word name shown below it, rather than emoji + "Voice caddy"/"Listening…" text —
+   and sized to match the wind panel's height exactly (both are stretched to the same row
+   height by the flex row that renders them side by side — see the `alignItems: "stretch"`
+   wrapper in PlayTab — with `height: "100%"` here to actually fill that stretched space). */
 function VoiceCaddyButton({ voiceOn, setVoiceOn, voiceMsg, mePlayer, wakeWord }) {
   const supported = voiceSupported();
   const name = (wakeWord || "").trim() || "Gaddy";
   return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0 }}>
       <button
         title={!supported ? "Voice control needs a browser with speech recognition (Chrome works best)" : !mePlayer ? "Mark a player as ⭐ you in the Players tab first" : voiceOn ? `Listening for "Hey ${name}, I'm using a..." or "Hey ${name}, record shot"` : "Turn on voice caddy"}
         disabled={!supported}
         onClick={() => setVoiceOn(!voiceOn)}
         style={{
-          ...headerActionBtnStyle,
-          background: voiceOn ? C.flag : C.white, color: voiceOn ? C.white : C.fairway, borderColor: voiceOn ? C.flag : C.fairway,
+          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3,
+          flex: 1, minWidth: 58, border: `1px solid ${voiceOn ? C.flag : C.line}`, borderRadius: 8,
+          background: voiceOn ? C.flag : C.white, padding: "0 10px", boxSizing: "border-box",
           opacity: supported ? 1 : 0.5, cursor: supported ? "pointer" : "not-allowed",
         }}
       >
-        {voiceOn ? "🎙️ Listening…" : "🎙️ Voice caddy"}
+        <MicIcon size={18} color={voiceOn ? C.white : C.fairway} />
+        <span style={{ fontFamily: sans, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em", color: voiceOn ? C.white : C.turf, whiteSpace: "nowrap" }}>
+          {name}
+        </span>
       </button>
-      {voiceOn && voiceMsg && <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, maxWidth: 220, textAlign: "right" }}>{voiceMsg}</div>}
+      {voiceOn && voiceMsg && <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, maxWidth: 150, textAlign: "center", marginTop: 3 }}>{voiceMsg}</div>}
     </div>
   );
 }
@@ -1085,16 +1143,6 @@ const btnPrimary = {
 const btnGhost = {
   background: "transparent", color: C.fairway, border: `1px solid ${C.fairway}`, borderRadius: 6,
   padding: "10px 16px", fontFamily: sans, fontSize: 14, fontWeight: 600, cursor: "pointer",
-};
-/* used for small action buttons (currently just Voice caddy, nested next to the wind panel
-   during scoring) — an explicit height + flex-centering, rather than padding alone, because a
-   button containing an emoji (🎙️) can render 3-4px taller than a plain-text button at the
-   "same" padding: color-emoji glyphs pull in a different font whose line metrics don't match
-   the surrounding sans-serif text, inflating the line box. Fixing the box height directly
-   sidesteps that regardless of glyph metrics. */
-const headerActionBtnStyle = {
-  ...btnGhost, fontSize: 12, height: 36, lineHeight: "20px", boxSizing: "border-box",
-  display: "inline-flex", alignItems: "center", justifyContent: "center", whiteSpace: "nowrap",
 };
 /* the top green ribbon's menu toggle — only rendered while a round is actively being scored
    (see App()'s `compact` state), replacing the full Play/Courses/Players/History tab row to
@@ -2698,8 +2746,11 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
         {/* course name/round type now live in the ribbon's compact header (see App()); Voice
             caddy nests next to the wind panel here instead of sitting in a local heading row,
             and Back to setup lives in the ribbon's hamburger menu — both freeing up vertical
-            space on the scoring screen, per the "more room while scoring" request. */}
-        <div style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 10 }}>
+            space on the scoring screen, per the "more room while scoring" request.
+            `alignItems: "stretch"` (rather than flex-start) makes the Voice caddy button match
+            the wind panel's height exactly, whatever that height ends up being — see
+            VoiceCaddyButton's `height: "100%"`. */}
+        <div style={{ display: "flex", gap: 8, alignItems: "stretch", marginBottom: 10 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <WindIndicator wind={wind} compass={compass} unit={distanceUnit === "m" ? "kmh" : "mph"} />
           </div>
@@ -2878,8 +2929,9 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
           <button onClick={() => setResumedNotice(false)} style={{ background: "transparent", border: "none", color: C.fairway, cursor: "pointer", fontSize: 14 }}>×</button>
         </div>
       )}
-      {/* see the matching comment in the stroke-play branch above — same ribbon-header move */}
-      <div style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 10 }}>
+      {/* see the matching comment in the stroke-play branch above — same ribbon-header move,
+          same alignItems: "stretch" height-matching */}
+      <div style={{ display: "flex", gap: 8, alignItems: "stretch", marginBottom: 10 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <WindIndicator wind={wind} compass={compass} unit={distanceUnit === "m" ? "kmh" : "mph"} />
         </div>
