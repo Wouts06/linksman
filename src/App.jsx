@@ -81,6 +81,18 @@ function haversineYards(lat1, lon1, lat2, lon2) {
   return haversineMeters(lat1, lon1, lat2, lon2) / 0.9144;
 }
 
+/* initial compass bearing (degrees, 0-360, clockwise from true north) from point 1 to point 2 —
+   used by DriveMapModal's "rotate to line" toggle (16 Aug) to find the direction of the shot. */
+function bearingDeg(lat1, lon1, lat2, lon2) {
+  if (lat1 == null || lon1 == null || lat2 == null || lon2 == null) return null;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const phi1 = toRad(lat1), phi2 = toRad(lat2);
+  const dLambda = toRad(lon2 - lon1);
+  const y = Math.sin(dLambda) * Math.cos(phi2);
+  const x = Math.cos(phi1) * Math.sin(phi2) - Math.sin(phi1) * Math.cos(phi2) * Math.cos(dLambda);
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
 /* live GPS position — one shared watcher, only active while `active` is true */
 function useLivePosition(active) {
   const [pos, setPos] = useState(null);
@@ -1305,13 +1317,51 @@ const teeIcon = new L.DivIcon({ className: "", html: `<div style="width:14px;hei
 const greenIcon = new L.DivIcon({ className: "", html: `<div style="width:16px;height:16px;border-radius:50%;background:${C.turf};border:2px solid #FBF9F2;"></div>`, iconSize: [16, 16], iconAnchor: [8, 8] });
 const landingIcon = new L.DivIcon({ className: "", html: `<div style="width:16px;height:16px;border-radius:50%;background:${C.flag};border:2px solid #FBF9F2;box-shadow:0 1px 4px rgba(0,0,0,0.4);"></div>`, iconSize: [16, 16], iconAnchor: [8, 8] });
 
-function MapClickCapture({ onPick }) {
-  useMapEvents({ click(e) { onPick(e.latlng); } });
+function MapClickCapture({ onPick, rotateDeg }) {
+  /* useMapEvents registers its handler object once and does not appear to rebind it on every
+     re-render (a stale-closure trap discovered while testing this, 16 Aug — clicks kept using
+     whatever rotateDeg was in effect at first mount, silently ignoring later toggle changes). A
+     ref sidesteps that entirely: the click handler always reads the CURRENT value at click time,
+     regardless of when useMapEvents last captured its closure. */
+  const rotateDegRef = useRef(rotateDeg);
+  useEffect(() => { rotateDegRef.current = rotateDeg; }, [rotateDeg]);
+  const map = useMapEvents({
+    click(e) {
+      const currentRotateDeg = rotateDegRef.current;
+      if (!currentRotateDeg) { onPick(e.latlng); return; }
+      /* the whole map container is visually rotated via a CSS transform (see DriveMapModal's
+         "rotate to line" toggle, 16 Aug) — Leaflet itself has no idea it's rotated, so its own
+         click->latlng math (based on the container's un-rotated pixel geometry) would be wrong
+         here. Fix: recover the click's offset from the container's CENTER in screen space (the
+         center is invariant under a CSS rotation, since rotation defaults to transform-origin:
+         50% 50%), undo the rotation on that offset to get back to the map's own unrotated pixel
+         space, then ask Leaflet for the lat/lng at that corrected point directly. */
+      const rect = map.getContainer().getBoundingClientRect();
+      const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+      const dxScreen = e.originalEvent.clientX - cx, dyScreen = e.originalEvent.clientY - cy;
+      const rad = (currentRotateDeg * Math.PI) / 180;
+      const dxMap = dxScreen * Math.cos(rad) + dyScreen * Math.sin(rad);
+      const dyMap = -dxScreen * Math.sin(rad) + dyScreen * Math.cos(rad);
+      const size = map.getSize();
+      onPick(map.containerPointToLatLng(L.point(size.x / 2 + dxMap, size.y / 2 + dyMap)));
+    },
+  });
+  /* dragging/panning math also assumes an unrotated container, so it's disabled while rotated
+     rather than shipping a map that pans in the wrong visual direction — zoom is unaffected
+     (it's always centered, no directional math involved) and tap-to-place still works via the
+     correction above. */
+  useEffect(() => {
+    if (rotateDeg) map.dragging.disable(); else map.dragging.enable();
+    return () => map.dragging.enable();
+  }, [rotateDeg, map]);
   return null;
 }
 
 function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, distanceUnit, greenTarget = "back", onSetGreenTarget, onSave, onCancel }) {
   const [pos, setPos] = useState(initialPos || null);
+  /* "rotate to line" (16 Aug) — off by default, since it's brand new and untested against a real
+     device's touch/drag feel; the map otherwise renders north-up exactly as before. */
+  const [rotateToLine, setRotateToLine] = useState(false);
   const shotWord = shotLabel || "drive";
   /* "from" point to measure this shot's own distance from — the tee for the first shot on a
      hole, or wherever the previous shot was marked for anything after that (passed in by the
@@ -1331,22 +1381,56 @@ function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, d
   const shotYards = pos && anchorLat != null ? haversineYards(anchorLat, anchorLon, pos.lat, pos.lng) : null;
   const remainYards = pos && aimGreen ? haversineYards(pos.lat, pos.lng, aimGreen.lat, aimGreen.lon) : null;
   const unitLabel = distanceUnit === "m" ? "m" : "yd";
+  /* "line of attack" bearing (16 Aug): current position (the dropped/tapped pin, since that's
+     the golfer's actual spot) toward the green — falls back to the anchor (tee/previous shot)
+     when no pin is down yet, so the toggle is still useful before the first tap. Rotating the
+     whole map by -bearing brings that direction to visually point "up", like a rangefinder. */
+  const lineBearing = bearingDeg(pos?.lat ?? anchorLat, pos?.lng ?? anchorLon, aimGreen?.lat, aimGreen?.lon);
+  const cssRotateDeg = rotateToLine && lineBearing != null ? -lineBearing : 0;
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(20,20,16,0.55)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 14 }}>
       <div style={{ background: C.paper, borderRadius: 10, padding: 16, width: "100%", maxWidth: 480, maxHeight: "92vh", overflow: "auto" }}>
         <div style={{ fontFamily: serif, fontSize: 16, color: C.fairway, marginBottom: 4 }}>Mark {label}'s {shotWord}</div>
         <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, marginBottom: 10 }}>
-          {initialPos ? "Pin dropped at your current GPS location — tap the map to adjust it, then save." : "Tap the map where the ball landed."}
+          {initialPos ? "Pin dropped at your current GPS location — tap the map to adjust it, or just save it as-is." : "Tap the map where the ball landed."}
         </div>
         <div style={{ height: 320, borderRadius: 6, overflow: "hidden", border: `1px solid ${C.line}` }}>
-          <MapContainer center={center} zoom={17} style={{ height: "100%", width: "100%" }}>
-            <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap contributors" />
-            {anchorLat != null && <Marker position={[anchorLat, anchorLon]} icon={teeIcon} />}
-            {aimGreen && <Marker position={[aimGreen.lat, aimGreen.lon]} icon={greenIcon} />}
-            {pos && <Marker position={pos} icon={landingIcon} />}
-            <MapClickCapture onPick={setPos} />
-          </MapContainer>
+          {/* the rotation transform lives on this plain wrapper div, NOT on MapContainer's own
+             style prop (16 Aug fix) -- react-leaflet only applies MapContainer's style prop once,
+             at initial mount, so later re-renders with a changed transform value were silently
+             not reaching the DOM. A wrapper div's style is normal reactive React state, and CSS
+             transforms on an ancestor rotate everything inside it (tiles, markers, the lot) the
+             same way a transform on the Leaflet container itself would have. */}
+          <div style={{ height: "100%", width: "100%", transform: cssRotateDeg ? `rotate(${cssRotateDeg}deg)` : undefined, transition: "transform 0.25s ease" }}>
+            <MapContainer center={center} zoom={17} style={{ height: "100%", width: "100%" }}>
+              <TileLayer
+                url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                attribution="Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community"
+              />
+              {anchorLat != null && <Marker position={[anchorLat, anchorLon]} icon={teeIcon} />}
+              {aimGreen && <Marker position={[aimGreen.lat, aimGreen.lon]} icon={greenIcon} />}
+              {pos && <Marker position={pos} icon={landingIcon} />}
+              <MapClickCapture onPick={setPos} rotateDeg={cssRotateDeg} />
+            </MapContainer>
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
+          <button
+            onClick={() => setRotateToLine((v) => !v)}
+            disabled={lineBearing == null}
+            style={{
+              fontSize: 10.5, fontFamily: sans, fontWeight: 700, padding: "4px 9px", borderRadius: 5, cursor: lineBearing == null ? "default" : "pointer",
+              border: `1px solid ${rotateToLine ? C.fairway : C.line}`,
+              background: rotateToLine ? C.fairway : C.white,
+              color: rotateToLine ? C.white : lineBearing == null ? C.line : C.turf,
+            }}
+          >
+            🧭 {rotateToLine ? "Line-up" : "North-up"}
+          </button>
+          {rotateToLine && (
+            <span style={{ fontSize: 10, fontFamily: sans, color: C.turf }}>Map dragging is off while rotated — tap to place, pinch/scroll to zoom.</span>
+          )}
         </div>
         <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, margin: "8px 0", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
           <span>
@@ -3958,6 +4042,10 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
         hole: hForP,
         label: players.find((p) => p.id === pid)?.name || "Player",
         shotLabel: "drive",
+        // pre-fill with current GPS position (16 Aug, per user request) — the modal still lets
+        // you tap the map to adjust it, but you're no longer forced to place the pin manually
+        // every time; only falls back to no pin if GPS isn't available yet.
+        initialPos: livePos ? { lat: livePos.lat, lng: livePos.lon } : null,
         onSave: (yd, lat, lng) => {
           const result = recordStrokeDrive(pid, hForP, { lat, lon: lng }, greenTarget);
           if (pid === mePlayerId) announceShotResult(result, { speakAloud: false });
@@ -3978,6 +4066,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
         label: players.find((p) => p.id === pid)?.name || "Player",
         shotLabel: "next shot",
         fromLat: prevPt?.lat, fromLon: prevPt?.lon,
+        initialPos: livePos ? { lat: livePos.lat, lng: livePos.lon } : null,
         onSave: (yd, lat, lng) => {
           const result = recordStrokeNextShot(pid, hForP, { lat, lon: lng }, greenTarget);
           if (pid === mePlayerId) announceShotResult(result, { speakAloud: false });
@@ -4151,6 +4240,8 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
       hole: hForP,
       label: playerName || "Player",
       shotLabel: "drive",
+      // pre-fill with current GPS position (16 Aug) — see markDriveForStroke's identical comment
+      initialPos: livePos ? { lat: livePos.lat, lng: livePos.lon } : null,
       onSave: (yd, lat, lng) => {
         const result = recordBBDrive(teamKey, who, hForP, { lat, lon: lng }, greenTarget);
         if (pid === mePlayerId) announceShotResult(result, { speakAloud: false });
@@ -4177,6 +4268,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
       label: playerName || "Player",
       shotLabel: `shot ${roundIndex + 1}`,
       fromLat: anchor?.lat, fromLon: anchor?.lon,
+      initialPos: livePos ? { lat: livePos.lat, lng: livePos.lon } : null,
       onSave: (yd, lat, lng) => {
         const result = recordBBShotAtRound(teamKey, who, hForP, roundIndex, { lat, lon: lng }, greenTarget);
         if (pid === mePlayerId) announceShotResult(result, { speakAloud: false });
