@@ -27,6 +27,13 @@
 // by color into named tee sets with real per-tee GPS and yardage. Not every course has this
 // level of detail mapped — most only have the single golf=hole line this app already used —
 // so an empty teeBoxes result is the common case, not a bug.
+//
+// Also fetches `golf=green` elements (14 Aug, tee/green back-edge round) — the actual green
+// polygon shape, distinct from (and usually more precise than) the golf=hole line's own end
+// vertex. When present, the client uses these polygons to compute a real "back of the green"
+// point (and, live during a round, to recompute which polygon vertex counts as "back" from the
+// player's current position/angle of approach) instead of a single fixed point. Same
+// not-every-course caveat applies — an empty green-polygon result is common and not a bug.
 
 const OVERPASS_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
@@ -72,7 +79,7 @@ export default async function handler(req, res) {
   const bboxQuery = hasBbox
     ? (() => {
         const [south, north, west, east] = bboxNums;
-        return `[out:json][timeout:25];(way["golf"="hole"](${south},${west},${north},${east});node["golf"="tee"](${south},${west},${north},${east});way["golf"="tee"](${south},${west},${north},${east}););out geom;`;
+        return `[out:json][timeout:25];(way["golf"="hole"](${south},${west},${north},${east});node["golf"="tee"](${south},${west},${north},${east});way["golf"="tee"](${south},${west},${north},${east});node["golf"="green"](${south},${west},${north},${east});way["golf"="green"](${south},${west},${north},${east}););out geom;`;
       })()
     : null;
 
@@ -83,7 +90,7 @@ export default async function handler(req, res) {
 
   if (hasArea) {
     const ref = osmType === "way" ? `way(${osmId})` : `relation(${osmId})`;
-    const areaQuery = `[out:json][timeout:25];${ref};map_to_area->.a;(way["golf"="hole"](area.a);node["golf"="tee"](area.a);way["golf"="tee"](area.a););out geom;`;
+    const areaQuery = `[out:json][timeout:25];${ref};map_to_area->.a;(way["golf"="hole"](area.a);node["golf"="tee"](area.a);way["golf"="tee"](area.a);node["golf"="green"](area.a);way["golf"="green"](area.a););out geom;`;
     const areaResult = await runQuery(areaQuery);
     if (areaResult.data && (areaResult.data.elements || []).length > 0) {
       res.status(200).json(areaResult.data);

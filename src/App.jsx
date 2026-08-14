@@ -681,6 +681,22 @@ function holeCompleteness(h) {
   return [h.par, h.strokeIndex, h.yardageMeters, h.teeLat, h.greenLat].filter((v) => v != null).length;
 }
 
+/* the polygon vertex (from a real OSM `golf=tee`/`golf=green` shape) farthest from a given
+   point — used both to pick the "back" of a tee box (farthest from the green, giving the
+   longest/correct yardage for that specific tee rather than an averaged centroid) and, live
+   during a round, the "back" of a green as seen from wherever a shot is being measured from
+   (see greenAimPoint below) — since which edge counts as "back" depends on the angle you're
+   approaching from, not one fixed point. Returns null for an empty/missing point list. */
+function farthestVertexFrom(lat, lon, points) {
+  let best = null, bestDist = -Infinity;
+  for (const p of points || []) {
+    if (p == null || p.lat == null || p.lon == null) continue;
+    const d = haversineMeters(lat, lon, p.lat, p.lon);
+    if (d > bestDist) { bestDist = d; best = { lat: p.lat, lon: p.lon }; }
+  }
+  return best;
+}
+
 /* Splits the raw Overpass response into (1) `golf=hole` ways — the existing per-hole
    par/distance/tee-green geometry — and (2) `golf=tee` points/areas — individual tee-box
    markers, some of which OpenStreetMap mappers colour-tag via `tee=<colour>` (e.g. `tee=red`;
@@ -725,6 +741,44 @@ function parseOSMHoleElements(data) {
   }
   const holes = [...byNumber.values()].sort((a, b) => a.number - b.number);
 
+  // golf=green elements: real green polygon shapes, sometimes tagged with ref=<hole> just like
+  // golf=hole ways — confirmed live on richly-mapped courses (14 Aug back-edge round). Not
+  // queried at all before this round; when present, this is what makes an actual "back of the
+  // green" point meaningful, instead of reusing the golf=hole line's own end vertex (which is
+  // often digitized stopping at the pin or front of the green, not its true back edge). Matched
+  // to a hole the same way tee markers are below (explicit ref first, else nearest-by-position —
+  // here compared against the hole's EXISTING (line-endpoint) green point, since that's a much
+  // closer physical match for a green polygon's centroid than the hole's tee point would be).
+  const rawGreenElements = elements.filter((el) => (el.tags || {}).golf === "green");
+  const greenPolysByHole = new Map(); // hole number -> polygon vertex array
+  for (const el of rawGreenElements) {
+    const tags = el.tags || {};
+    const geom = el.geometry && el.geometry.length ? el.geometry : (el.lat != null ? [{ lat: el.lat, lon: el.lon }] : []);
+    if (!geom.length) continue;
+    const centroidLat = geom.reduce((s, p) => s + p.lat, 0) / geom.length;
+    const centroidLon = geom.reduce((s, p) => s + p.lon, 0) / geom.length;
+    const explicitNumber = tags.ref ? Number(tags.ref) : null;
+    const number = explicitNumber != null && !isNaN(explicitNumber) ? explicitNumber : nearestHoleNumber(centroidLat, centroidLon, holes, "green");
+    if (number == null) continue;
+    const existing = greenPolysByHole.get(number);
+    if (!existing || geom.length > existing.length) greenPolysByHole.set(number, geom.map((p) => ({ lat: p.lat, lon: p.lon })));
+  }
+  // Upgrade each hole's green reference from "wherever the golf=hole line happens to end" to the
+  // true back edge of the real green polygon (the vertex farthest from the tee — the far side of
+  // the green as seen from where the shot is hit from), and keep the full polygon around so live
+  // in-round distances can recompute their own "back" as the player's position changes (see
+  // greenAimPoint). Holes with no matched polygon (most courses) keep the original line-endpoint
+  // greenLat/greenLon and get greenPolygon: null.
+  for (const h of holes) {
+    const poly = greenPolysByHole.get(h.number);
+    if (!poly) { h.greenPolygon = null; continue; }
+    h.greenPolygon = poly;
+    if (h.teeLat != null) {
+      const back = farthestVertexFrom(h.teeLat, h.teeLon, poly);
+      if (back) { h.greenLat = back.lat; h.greenLon = back.lon; }
+    }
+  }
+
   // golf=tee elements: a node has lat/lon directly; an area (way/multipolygon) is returned as
   // a geometry ring by `out geom`, so its center is approximated as the average of its
   // vertices — plenty precise for "which tee box is this," not meant to be exact-centroid.
@@ -765,32 +819,70 @@ function parseOSMHoleElements(data) {
       const explicitNumber = tags.ref ? Number(tags.ref) : null;
       const number = explicitNumber != null && !isNaN(explicitNumber) ? explicitNumber : nearestHoleNumber(lat, lon, holes);
       if (number == null) return [];
+
+      // BACK OF TEE BOX (14 Aug back-edge round): real golf=tee elements are commonly mapped as
+      // full polygons (13-19 vertices, confirmed live), not simple points — collapsing that to a
+      // centroid (above) is fine for "which tee box is this" hole-matching, but understates the
+      // actual play distance from this specific tee. Once this marker's hole is known, pick the
+      // polygon vertex farthest from that hole's own green — i.e. the deepest point of the tee
+      // box in the direction away from the shot, which is what "back of the tee box" means and
+      // gives the longest (correct) yardage for this tee. Simple node-type markers (geom.length
+      // <= 1) have no "back" to pick and keep the point/centroid as before.
+      let pointLat = lat, pointLon = lon;
+      if (geom.length > 1) {
+        const matchedHole = holes.find((h) => h.number === number);
+        if (matchedHole && matchedHole.greenLat != null) {
+          const back = farthestVertexFrom(matchedHole.greenLat, matchedHole.greenLon, geom);
+          if (back) { pointLat = back.lat; pointLon = back.lon; }
+        }
+      }
+
       const colors = String(tags.tee).split(";").map((c) => c.trim()).filter(Boolean);
       const distKeys = Object.keys(tags).filter((k) => k.toLowerCase().startsWith("dist:"));
       return colors.map((color) => {
         const distKey = distKeys.find((k) => k.slice(5).toLowerCase() === color.toLowerCase());
         const rawDist = distKey ? tags[distKey] : null;
         const distMeters = rawDist != null ? parseFloat(String(rawDist).replace(/[^0-9.]/g, "")) : NaN;
-        return { number, color, lat, lon, distMeters: isNaN(distMeters) ? null : distMeters };
+        return { number, color, lat: pointLat, lon: pointLon, distMeters: isNaN(distMeters) ? null : distMeters };
       });
     });
 
   return { holes, teeBoxes };
 }
 
-/* real golf=tee elements essentially never carry a hole-number tag in practice (see the note
-   above parseOSMHoleElements's teeBoxes) — this finds whichever hole's own tee point (already
-   parsed from its golf=hole way, see `holes` above) is physically closest to a tee marker's own
-   position, which is how a human would identify "whose tee box is this" too. Returns null if no
-   hole in this course has a usable tee point to compare against (e.g. no golf=hole ways at all). */
-function nearestHoleNumber(lat, lon, holes) {
+/* real golf=tee (and golf=green) elements essentially never carry a hole-number tag in practice
+   (see the note above parseOSMHoleElements's teeBoxes) — this finds whichever hole's own anchor
+   point (already parsed from its golf=hole way, see `holes` above) is physically closest to a
+   marker's own position, which is how a human would identify "whose hole is this" too. `anchor`
+   picks which point on each hole to compare against — "tee" (default, used for golf=tee markers)
+   or "green" (used for golf=green polygons, a much closer physical match than the tee would be).
+   Returns null if no hole in this course has a usable anchor point to compare against. */
+function nearestHoleNumber(lat, lon, holes, anchor = "tee") {
   let best = null, bestDist = Infinity;
   for (const h of holes) {
-    if (h.teeLat == null || h.teeLon == null) continue;
-    const d = haversineMeters(lat, lon, h.teeLat, h.teeLon);
+    const aLat = anchor === "green" ? h.greenLat : h.teeLat;
+    const aLon = anchor === "green" ? h.greenLon : h.teeLon;
+    if (aLat == null || aLon == null) continue;
+    const d = haversineMeters(lat, lon, aLat, aLon);
     if (d < bestDist) { bestDist = d; best = h.number; }
   }
   return best;
+}
+
+/* "back of the green" from wherever a shot is being measured from right now — not a fixed
+   point. When the hole's real green polygon is known (see parseOSMHoleElements), returns
+   whichever vertex is farthest from fromLat/fromLon, which is what "the back" means once you
+   account for the angle you're approaching from. Falls back to the hole's static
+   greenLat/greenLon (itself the tee-anchored back-of-green when a polygon was available at
+   course-save time, or the older line-endpoint approximation otherwise) when there's no polygon,
+   or no live position yet to recompute from. Returns null only when neither is available. */
+function greenAimPoint(fromLat, fromLon, hole) {
+  if (!hole) return null;
+  if (hole.greenPolygon && hole.greenPolygon.length && fromLat != null && fromLon != null) {
+    const far = farthestVertexFrom(fromLat, fromLon, hole.greenPolygon);
+    if (far) return far;
+  }
+  return hole.greenLat != null ? { lat: hole.greenLat, lon: hole.greenLon } : null;
 }
 
 /* Groups raw golf=tee markers (see parseOSMHoleElements) into named tee sets — one per
@@ -1139,12 +1231,17 @@ function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, d
      caller via fromLat/fromLon; falls back to the tee for backward compatibility). */
   const anchorLat = fromLat ?? hole.teeLat;
   const anchorLon = fromLon ?? hole.teeLon;
-  const hasBoth = anchorLat != null && hole.greenLat != null;
+  /* "back of the green" recomputed live from wherever the ball was just marked — not a fixed
+     point — since which edge of the green counts as "back" depends on the angle of approach
+     (14 Aug back-edge round, see greenAimPoint). Before a spot is tapped there's no "from"
+     position to recompute from yet, so the map/marker fall back to the hole's static point. */
+  const aimGreen = pos ? greenAimPoint(pos.lat, pos.lng, hole) : (hole.greenLat != null ? { lat: hole.greenLat, lon: hole.greenLon } : null);
+  const hasBoth = anchorLat != null && aimGreen != null;
   const center = hasBoth
-    ? [(anchorLat + hole.greenLat) / 2, (anchorLon + hole.greenLon) / 2]
-    : [anchorLat ?? hole.greenLat, anchorLon ?? hole.greenLon];
+    ? [(anchorLat + aimGreen.lat) / 2, (anchorLon + aimGreen.lon) / 2]
+    : [anchorLat ?? aimGreen?.lat, anchorLon ?? aimGreen?.lon];
   const shotYards = pos && anchorLat != null ? haversineYards(anchorLat, anchorLon, pos.lat, pos.lng) : null;
-  const remainYards = pos && hole.greenLat != null ? haversineYards(pos.lat, pos.lng, hole.greenLat, hole.greenLon) : null;
+  const remainYards = pos && aimGreen ? haversineYards(pos.lat, pos.lng, aimGreen.lat, aimGreen.lon) : null;
   const unitLabel = distanceUnit === "m" ? "m" : "yd";
 
   return (
@@ -1158,7 +1255,7 @@ function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, d
           <MapContainer center={center} zoom={17} style={{ height: "100%", width: "100%" }}>
             <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap contributors" />
             {anchorLat != null && <Marker position={[anchorLat, anchorLon]} icon={teeIcon} />}
-            {hole.greenLat != null && <Marker position={[hole.greenLat, hole.greenLon]} icon={greenIcon} />}
+            {aimGreen && <Marker position={[aimGreen.lat, aimGreen.lon]} icon={greenIcon} />}
             {pos && <Marker position={pos} icon={landingIcon} />}
             <MapClickCapture onPick={setPos} />
           </MapContainer>
@@ -1599,7 +1696,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
   const [manualLat, setManualLat] = useState("");
   const [manualLon, setManualLon] = useState("");
   const [holes, setHoles] = useState(
-    Array.from({ length: 18 }, (_, i) => ({ number: i + 1, par: 4, yardage: "", strokeIndex: "", teeLat: null, teeLon: null, greenLat: null, greenLon: null }))
+    Array.from({ length: 18 }, (_, i) => ({ number: i + 1, par: 4, yardage: "", strokeIndex: "", teeLat: null, teeLon: null, greenLat: null, greenLon: null, greenPolygon: null }))
   );
   const [osmQuery, setOsmQuery] = useState("");
   const [osmResults, setOsmResults] = useState([]);
@@ -1730,6 +1827,10 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
           teeLon: found?.teeLon ?? null,
           greenLat: found?.greenLat ?? null,
           greenLon: found?.greenLon ?? null,
+          // real green polygon (14 Aug back-edge round), when OpenStreetMap has one mapped for
+          // this hole — carried through to saveCourse below so live in-round distances can
+          // recompute "back of the green" from the player's own position (see greenAimPoint)
+          greenPolygon: found?.greenPolygon ?? null,
         };
       });
       const gpsCount = osmHoles.filter((h) => h.greenLat != null).length;
@@ -1839,14 +1940,14 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
 
   function resetForm() {
     setName(""); setNumHoles(18); setRating(""); setSlope(""); setManualLat(""); setManualLon("");
-    setHoles(Array.from({ length: 18 }, (_, i) => ({ number: i + 1, par: 4, yardage: "", strokeIndex: "", teeLat: null, teeLon: null, greenLat: null, greenLon: null })));
+    setHoles(Array.from({ length: 18 }, (_, i) => ({ number: i + 1, par: 4, yardage: "", strokeIndex: "", teeLat: null, teeLon: null, greenLat: null, greenLon: null, greenPolygon: null })));
     setOsmQuery(""); setOsmResults([]); setOsmStatus(""); setOsmFailed(false); setLastOSMCandidate(null); setOsmFromCache(false);
     setTeeColor("White"); setExtraTees([]); setPrimaryFromOSM(false);
     setAdding(false);
   }
   function updateHoleCount(n) {
     setNumHoles(n);
-    setHoles(Array.from({ length: n }, (_, i) => holes[i] || { number: i + 1, par: 4, yardage: "", strokeIndex: "", teeLat: null, teeLon: null, greenLat: null, greenLon: null }));
+    setHoles(Array.from({ length: n }, (_, i) => holes[i] || { number: i + 1, par: 4, yardage: "", strokeIndex: "", teeLat: null, teeLon: null, greenLat: null, greenLon: null, greenPolygon: null }));
   }
   function updateHole(i, field, val) {
     const next = [...holes];
@@ -1930,6 +2031,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
       holes: holes.map((h) => ({
         number: h.number, par: Number(h.par) || 4, yardage: h.yardage ? Number(h.yardage) : null, strokeIndex: h.strokeIndex ? Number(h.strokeIndex) : null,
         teeLat: h.teeLat ?? null, teeLon: h.teeLon ?? null, greenLat: h.greenLat ?? null, greenLon: h.greenLon ?? null,
+        greenPolygon: h.greenPolygon ?? null,
       })),
       tees,
     };
@@ -2385,7 +2487,8 @@ function computePendingShot({ hole, format, mePlayerId, selected, scores, bbStat
       const extra = cell.extraShots || [];
       anchor = extra.length ? { lat: extra[extra.length - 1].lat, lon: extra[extra.length - 1].lon } : { lat: cell.driveLat, lon: cell.driveLon };
     }
-    const remaining = hole.greenLat != null && anchor ? haversineYards(anchor.lat, anchor.lon, hole.greenLat, hole.greenLon) : null;
+    const aimGreen = anchor ? greenAimPoint(anchor.lat, anchor.lon, hole) : null;
+    const remaining = aimGreen && anchor ? haversineYards(anchor.lat, anchor.lon, aimGreen.lat, aimGreen.lon) : null;
     if (!isDrive && remaining != null && remaining < NEAR_GREEN_YARDS) return null;
     return { kind: "stroke", hole, anchor, isDrive };
   }
@@ -2411,7 +2514,8 @@ function computePendingShot({ hole, format, mePlayerId, selected, scores, bbStat
     ? (s.rounds[0][driveLatField] != null ? { lat: s.rounds[0][driveLatField], lon: s.rounds[0][driveLonField] } : { lat: hole.teeLat, lon: hole.teeLon })
     : (s.rounds[roundIndex - 1].lat != null ? { lat: s.rounds[roundIndex - 1].lat, lon: s.rounds[roundIndex - 1].lon } : null);
   if (!anchor) return null;
-  const remaining = hole.greenLat != null ? haversineYards(anchor.lat, anchor.lon, hole.greenLat, hole.greenLon) : null;
+  const aimGreen = greenAimPoint(anchor.lat, anchor.lon, hole);
+  const remaining = aimGreen ? haversineYards(anchor.lat, anchor.lon, aimGreen.lat, aimGreen.lon) : null;
   if (remaining != null && remaining < NEAR_GREEN_YARDS) return null;
   return { kind: "bb", hole, teamKey, who, anchor, isDrive: false, roundIndex };
 }
@@ -2430,7 +2534,8 @@ function bbHoleScore(state) {
 
 function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, playerBName, playerAId, playerBId, state, onUpdate, onMarkDrive, onMarkShot, livePos, distanceUnit, mePlayerId, meBag, course, teeAssign }) {
   const s = state || defaultBBHole();
-  const remainingYards = hole.greenLat != null && livePos ? haversineYards(livePos.lat, livePos.lon, hole.greenLat, hole.greenLon) : null;
+  const aimGreen = livePos ? greenAimPoint(livePos.lat, livePos.lon, hole) : null;
+  const remainingYards = aimGreen && livePos ? haversineYards(livePos.lat, livePos.lon, aimGreen.lat, aimGreen.lon) : null;
   const suggestion = meBag?.length > 0 ? suggestClub(meBag, remainingYards) : null;
   const unitLabel = distanceUnit === "m" ? "m" : "y";
   const courseTees = course ? getCourseTees(course) : [];
@@ -2471,7 +2576,7 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
           {score == null && <div style={{ fontFamily: sans, fontSize: 11, color: C.turf }}>shots so far</div>}
         </div>
       </div>
-      {hole.greenLat != null && livePos && (
+      {remainingYards != null && (
         <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, marginBottom: 6 }}>
           📍 {Math.round(displayDistance(remainingYards, distanceUnit))}{distanceUnit === "m" ? "m" : "y"} to green (live)
           {suggestion && <span style={{ color: C.fairway, fontWeight: 700, marginLeft: 6 }}>🎒 {suggestion}</span>}
@@ -2616,7 +2721,8 @@ function BetterBallFocusedHole({
   hole, isLast, solo, pA1, pB1, pA2, pB2, team1Ids, team2Ids, bbState, distanceUnit, livePos,
   mePlayerId, mePlayer, course, teeAssign, onUpdateTeam1, onUpdateTeam2, onMarkDrive1, onMarkShot1, onMarkDrive2, onMarkShot2, onNext,
 }) {
-  const liveYards = hole.greenLat != null && livePos ? haversineYards(livePos.lat, livePos.lon, hole.greenLat, hole.greenLon) : null;
+  const aimGreen = livePos ? greenAimPoint(livePos.lat, livePos.lon, hole) : null;
+  const liveYards = aimGreen && livePos ? haversineYards(livePos.lat, livePos.lon, aimGreen.lat, aimGreen.lon) : null;
   const unitLabel = distanceUnit === "m" ? "m" : "y";
   return (
     <div style={{ padding: 12, background: C.white }}>
@@ -2664,7 +2770,8 @@ function BetterBallFocusedHole({
    screen while active; one compact card per selected player inside it. Direction/putts and
    shot-marking sit side by side as equal-width flex columns so neither overflows the card. */
 function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit, livePos, mePlayer, course, teeAssign, onScoreField, onMarkDrive, onMarkNextShot, onNext }) {
-  const liveYards = hole.greenLat != null && livePos ? haversineYards(livePos.lat, livePos.lon, hole.greenLat, hole.greenLon) : null;
+  const aimGreen = livePos ? greenAimPoint(livePos.lat, livePos.lon, hole) : null;
+  const liveYards = aimGreen && livePos ? haversineYards(livePos.lat, livePos.lon, aimGreen.lat, aimGreen.lon) : null;
   const suggestion = liveYards != null && mePlayer?.bag?.length ? suggestClub(mePlayer.bag, liveYards) : null;
   const unitLabel = distanceUnit === "m" ? "m" : "y";
   /* the header distance above reflects the course's first/default tee; when a player is
@@ -2969,7 +3076,8 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
       const cell = prev[pid]?.[hole.number] || {};
       const anchor = hole.teeLat != null ? { lat: hole.teeLat, lon: hole.teeLon } : null;
       const yards = anchor ? haversineYards(anchor.lat, anchor.lon, pos.lat, pos.lon) : null;
-      const remaining = hole.greenLat != null ? haversineYards(pos.lat, pos.lon, hole.greenLat, hole.greenLon) : null;
+      const aimGreen = greenAimPoint(pos.lat, pos.lon, hole);
+      const remaining = aimGreen ? haversineYards(pos.lat, pos.lon, aimGreen.lat, aimGreen.lon) : null;
       result = { label: "Drive", yards, remaining };
       const nextCell = { ...cell, driveYards: yards != null ? Math.round(yards) : null, driveLat: pos.lat, driveLon: pos.lon };
       return { ...prev, [pid]: { ...prev[pid], [hole.number]: nextCell } };
@@ -2989,7 +3097,8 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
         ? { lat: hole.teeLat, lon: hole.teeLon }
         : null;
       const yards = prevPt ? haversineYards(prevPt.lat, prevPt.lon, pos.lat, pos.lon) : null;
-      const remaining = hole.greenLat != null ? haversineYards(pos.lat, pos.lon, hole.greenLat, hole.greenLon) : null;
+      const aimGreen = greenAimPoint(pos.lat, pos.lon, hole);
+      const remaining = aimGreen ? haversineYards(pos.lat, pos.lon, aimGreen.lat, aimGreen.lon) : null;
       result = { label: `Shot ${extra.length + 2}`, yards, remaining };
       const nextExtra = [...extra, { yards: yards != null ? Math.round(yards) : null, lat: pos.lat, lon: pos.lon, club: null }];
       return { ...prev, [pid]: { ...prev[pid], [hole.number]: { ...cell, extraShots: nextExtra } } };
@@ -3006,7 +3115,8 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
       const driveYardsField = who === "A" ? "driveYardsA" : "driveYardsB";
       const anchor = hole.teeLat != null ? { lat: hole.teeLat, lon: hole.teeLon } : null;
       const yards = anchor ? haversineYards(anchor.lat, anchor.lon, pos.lat, pos.lon) : null;
-      const remaining = hole.greenLat != null ? haversineYards(pos.lat, pos.lon, hole.greenLat, hole.greenLon) : null;
+      const aimGreen = greenAimPoint(pos.lat, pos.lon, hole);
+      const remaining = aimGreen ? haversineYards(pos.lat, pos.lon, aimGreen.lat, aimGreen.lon) : null;
       result = { label: "Drive", yards, remaining };
       rounds[0] = { ...rounds[0], [driveYardsField]: yards != null ? Math.round(yards) : null, [driveLatField]: pos.lat, [driveLonField]: pos.lon };
       return { ...prev, [teamKey]: { ...prev[teamKey], [hole.number]: { ...s, rounds } } };
@@ -3032,7 +3142,8 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
         ? { lat: rounds[roundIndex - 1].lat, lon: rounds[roundIndex - 1].lon }
         : null;
       const yards = anchor ? haversineYards(anchor.lat, anchor.lon, pos.lat, pos.lon) : null;
-      const remaining = hole.greenLat != null ? haversineYards(pos.lat, pos.lon, hole.greenLat, hole.greenLon) : null;
+      const aimGreen = greenAimPoint(pos.lat, pos.lon, hole);
+      const remaining = aimGreen ? haversineYards(pos.lat, pos.lon, aimGreen.lat, aimGreen.lon) : null;
       result = { label: `Shot ${roundIndex + 1}`, yards, remaining };
       rounds[roundIndex] = { ...rounds[roundIndex], shotYards: yards != null ? Math.round(yards) : null, lat: pos.lat, lon: pos.lon };
       return { ...prev, [teamKey]: { ...prev[teamKey], [hole.number]: { ...s, rounds } } };
