@@ -697,6 +697,20 @@ function farthestVertexFrom(lat, lon, points) {
   return best;
 }
 
+/* the polygon vertex nearest a given point — the "front" counterpart to farthestVertexFrom
+   above, used by greenAimPoint (below) for the 14 Aug front/back toggle: front-of-green is
+   whichever vertex is CLOSEST to wherever the shot is being measured from, the near edge you'd
+   actually clear first, while back-of-green (farthestVertexFrom) is the far edge. */
+function nearestVertexFrom(lat, lon, points) {
+  let best = null, bestDist = Infinity;
+  for (const p of points || []) {
+    if (p == null || p.lat == null || p.lon == null) continue;
+    const d = haversineMeters(lat, lon, p.lat, p.lon);
+    if (d < bestDist) { bestDist = d; best = { lat: p.lat, lon: p.lon }; }
+  }
+  return best;
+}
+
 /* Splits the raw Overpass response into (1) `golf=hole` ways — the existing per-hole
    par/distance/tee-green geometry — and (2) `golf=tee` points/areas — individual tee-box
    markers, some of which OpenStreetMap mappers colour-tag via `tee=<colour>` (e.g. `tee=red`;
@@ -869,20 +883,52 @@ function nearestHoleNumber(lat, lon, holes, anchor = "tee") {
   return best;
 }
 
-/* "back of the green" from wherever a shot is being measured from right now — not a fixed
-   point. When the hole's real green polygon is known (see parseOSMHoleElements), returns
-   whichever vertex is farthest from fromLat/fromLon, which is what "the back" means once you
-   account for the angle you're approaching from. Falls back to the hole's static
-   greenLat/greenLon (itself the tee-anchored back-of-green when a polygon was available at
-   course-save time, or the older line-endpoint approximation otherwise) when there's no polygon,
-   or no live position yet to recompute from. Returns null only when neither is available. */
-function greenAimPoint(fromLat, fromLon, hole) {
+/* "front" or "back" of the green from wherever a shot is being measured from right now — not a
+   fixed point. When the hole's real green polygon is known (see parseOSMHoleElements), returns
+   whichever vertex is nearest (target "front") or farthest (target "back", the default —
+   matches the 14 Aug back-edge feature's original behavior) from fromLat/fromLon, which is what
+   "front"/"back" mean once you account for the angle you're approaching from. Falls back to the
+   hole's static greenLat/greenLon (itself the tee-anchored back-of-green when a polygon was
+   available at course-save time, or the older line-endpoint approximation otherwise) — for any
+   hole with no polygon, front and back are the same single point, since there's nothing else to
+   distinguish between (the 14 Aug front/back toggle is hidden for these holes in the UI for
+   exactly this reason — see GreenTargetToggle). Returns null only when neither is available. */
+function greenAimPoint(fromLat, fromLon, hole, target = "back") {
   if (!hole) return null;
   if (hole.greenPolygon && hole.greenPolygon.length && fromLat != null && fromLon != null) {
-    const far = farthestVertexFrom(fromLat, fromLon, hole.greenPolygon);
-    if (far) return far;
+    const picked = target === "front" ? nearestVertexFrom(fromLat, fromLon, hole.greenPolygon) : farthestVertexFrom(fromLat, fromLon, hole.greenPolygon);
+    if (picked) return picked;
   }
   return hole.greenLat != null ? { lat: hole.greenLat, lon: hole.greenLon } : null;
+}
+
+/* small Front/Back segmented toggle — the 14 Aug UI for choosing which edge of the green
+   greenAimPoint measures to. Shown wherever a live green distance appears (StrokeHoleCard/
+   BetterBallFocusedHole headers, DriveMapModal) so it can be flipped "at any given time" during
+   a hole/shot per the user's explicit request, all backed by the same single round-level
+   greenTarget state (PlayTab) — not a separate memory per hole, so flipping it anywhere updates
+   every other reading immediately. Callers gate this on hole.greenPolygon existing — with no
+   polygon, front and back resolve to the same point (see greenAimPoint), so showing a toggle
+   that changes nothing would just be confusing. */
+function GreenTargetToggle({ value, onChange }) {
+  return (
+    <div onClick={(e) => e.stopPropagation()} style={{ display: "inline-flex", border: `1px solid ${C.line}`, borderRadius: 5, overflow: "hidden", flexShrink: 0 }}>
+      {["front", "back"].map((opt) => (
+        <button
+          key={opt}
+          onClick={() => onChange(opt)}
+          style={{
+            fontSize: 10.5, fontFamily: sans, fontWeight: 700, padding: "3px 8px", cursor: "pointer",
+            border: "none", textTransform: "capitalize",
+            background: value === opt ? C.fairway : C.white,
+            color: value === opt ? C.white : C.turf,
+          }}
+        >
+          {opt}
+        </button>
+      ))}
+    </div>
+  );
 }
 
 /* Groups raw golf=tee markers (see parseOSMHoleElements) into named tee sets — one per
@@ -1223,7 +1269,7 @@ function MapClickCapture({ onPick }) {
   return null;
 }
 
-function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, distanceUnit, onSave, onCancel }) {
+function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, distanceUnit, greenTarget = "back", onSetGreenTarget, onSave, onCancel }) {
   const [pos, setPos] = useState(initialPos || null);
   const shotWord = shotLabel || "drive";
   /* "from" point to measure this shot's own distance from — the tee for the first shot on a
@@ -1231,11 +1277,12 @@ function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, d
      caller via fromLat/fromLon; falls back to the tee for backward compatibility). */
   const anchorLat = fromLat ?? hole.teeLat;
   const anchorLon = fromLon ?? hole.teeLon;
-  /* "back of the green" recomputed live from wherever the ball was just marked — not a fixed
-     point — since which edge of the green counts as "back" depends on the angle of approach
-     (14 Aug back-edge round, see greenAimPoint). Before a spot is tapped there's no "from"
-     position to recompute from yet, so the map/marker fall back to the hole's static point. */
-  const aimGreen = pos ? greenAimPoint(pos.lat, pos.lng, hole) : (hole.greenLat != null ? { lat: hole.greenLat, lon: hole.greenLon } : null);
+  /* "front" or "back" of the green (per greenTarget/GreenTargetToggle, 14 Aug) recomputed live
+     from wherever the ball was just marked — not a fixed point — since which edge counts as
+     "front"/"back" depends on the angle of approach (see greenAimPoint). Before a spot is
+     tapped there's no "from" position to recompute from yet, so the map/marker fall back to the
+     hole's static point. */
+  const aimGreen = pos ? greenAimPoint(pos.lat, pos.lng, hole, greenTarget) : (hole.greenLat != null ? { lat: hole.greenLat, lon: hole.greenLon } : null);
   const hasBoth = anchorLat != null && aimGreen != null;
   const center = hasBoth
     ? [(anchorLat + aimGreen.lat) / 2, (anchorLon + aimGreen.lon) / 2]
@@ -1260,14 +1307,17 @@ function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, d
             <MapClickCapture onPick={setPos} />
           </MapContainer>
         </div>
-        <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, margin: "8px 0" }}>
-          <span style={{ color: C.fairway, fontWeight: 700 }}>◎</span> {fromLat != null ? "Previous shot" : "Tee"} &nbsp;·&nbsp; <span style={{ color: C.turf, fontWeight: 700 }}>●</span> Green &nbsp;·&nbsp; <span style={{ color: C.flag, fontWeight: 700 }}>●</span> Where you tapped
+        <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, margin: "8px 0", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+          <span>
+            <span style={{ color: C.fairway, fontWeight: 700 }}>◎</span> {fromLat != null ? "Previous shot" : "Tee"} &nbsp;·&nbsp; <span style={{ color: C.turf, fontWeight: 700 }}>●</span> Green &nbsp;·&nbsp; <span style={{ color: C.flag, fontWeight: 700 }}>●</span> Where you tapped
+          </span>
+          {hole.greenPolygon?.length > 0 && <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} />}
         </div>
         {pos ? (
           <div style={{ fontFamily: mono, fontSize: 14, color: C.ink, marginBottom: 10 }}>
             {shotYards != null && <>This shot: <b>{Math.round(displayDistance(shotYards, distanceUnit))} {unitLabel}</b></>}
             {shotYards != null && remainYards != null && " · "}
-            {remainYards != null && <>Remaining to green: <b>{Math.round(displayDistance(remainYards, distanceUnit))} {unitLabel}</b></>}
+            {remainYards != null && <>Remaining to {hole.greenPolygon?.length > 0 ? `${greenTarget} of green` : "green"}: <b>{Math.round(displayDistance(remainYards, distanceUnit))} {unitLabel}</b></>}
           </div>
         ) : (
           <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, marginBottom: 10 }}>No spot marked yet.</div>
@@ -1281,18 +1331,22 @@ function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, d
   );
 }
 
-/* picks readable text color (near-black or white) for a given hex background — used by the
-   per-player tee chips (PlayerTeeChips, below) to keep each selected tee's colored chip legible
-   regardless of how light/dark that tee's own color is (e.g. white/yellow chips need dark text,
-   black/blue/red/green chips need light text). Standard relative-luminance approximation, not
-   full WCAG contrast math — plenty accurate for a handful of fixed preset colors. */
-function readableTextOn(hex) {
+/* standard relative-luminance approximation for a hex color — not full WCAG contrast math, but
+   plenty accurate for a handful of fixed tee-preset colors. Shared by readableTextOn (text
+   color) and PlayerTeeChips (glow treatment for light-colored chips), below. */
+function colorLuminance(hex) {
   const clean = (hex || "#8A8A8A").replace("#", "");
   const r = parseInt(clean.substring(0, 2), 16) || 0;
   const g = parseInt(clean.substring(2, 4), 16) || 0;
   const b = parseInt(clean.substring(4, 6), 16) || 0;
-  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-  return luminance > 0.6 ? "#1A1A1A" : "#FFFFFF";
+  return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+}
+/* picks readable text color (near-black or white) for a given hex background — used by the
+   per-player tee chips (PlayerTeeChips, below) to keep each selected tee's colored chip legible
+   regardless of how light/dark that tee's own color is (e.g. white/yellow chips need dark text,
+   black/blue/red/green chips need light text). */
+function readableTextOn(hex) {
+  return colorLuminance(hex) > 0.6 ? "#1A1A1A" : "#FFFFFF";
 }
 
 /* Per-player tee selection at round setup — redesigned 14 Aug after the user liked the look and
@@ -1332,16 +1386,25 @@ function PlayerTeeChips({ player, course, teeId, onSelectTee }) {
         {tees.map((t) => {
           const isSelected = t.id === selectedTee.id;
           const textColor = readableTextOn(t.color);
+          // a light-colored tee's own fill (e.g. White, #FBF9F2) sits so close to the card's
+          // own white background that a selected chip read as "inactive" (user's report, 14
+          // Aug) — every other, more-saturated color already reads clearly selected via its own
+          // full-color fill, so this only kicks in for light colors: an accent-colored glow
+          // ring around the border, on top of the same fill/text treatment every color gets.
+          const isLight = colorLuminance(t.color) > 0.6;
           return (
             <button
               key={t.id}
               onClick={() => onSelectTee(t.id)}
               style={{
                 display: "flex", alignItems: "center", gap: 6, fontFamily: sans, cursor: "pointer",
-                border: `1.5px solid ${isSelected ? t.color : C.line}`, borderRadius: 6, padding: "6px 10px",
+                border: `1.5px solid ${isSelected ? (isLight ? C.fairway : t.color) : C.line}`, borderRadius: 6, padding: "6px 10px",
                 background: isSelected ? t.color : C.white, color: isSelected ? textColor : C.ink,
-                fontWeight: isSelected ? 700 : 500, boxShadow: isSelected ? "0 1px 3px rgba(0,0,0,0.18)" : "none",
-                transition: "background 0.15s ease, color 0.15s ease, border-color 0.15s ease",
+                fontWeight: isSelected ? 700 : 500,
+                boxShadow: isSelected
+                  ? (isLight ? `0 0 0 3px ${C.fairway}4D, 0 0 8px 1px ${C.fairway}80, 0 1px 3px rgba(0,0,0,0.18)` : "0 1px 3px rgba(0,0,0,0.18)")
+                  : "none",
+                transition: "background 0.15s ease, color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease",
               }}
             >
               {!isSelected && <span style={{ width: 9, height: 9, borderRadius: "50%", display: "inline-block", background: t.color, border: `1px solid ${C.line}`, flexShrink: 0 }} />}
@@ -2467,7 +2530,7 @@ function defaultBBHole() {
    Returns null when there's nothing sensible to record right now (no course/hole GPS, "you"
    isn't marked, "you" aren't in this hole's group, or the ball is already close enough to the
    green that this is assumed to be short-game/putting rather than a full shot). */
-function computePendingShot({ hole, format, mePlayerId, selected, scores, bbState, team1Ids, team2Ids }) {
+function computePendingShot({ hole, format, mePlayerId, selected, scores, bbState, team1Ids, team2Ids, greenTarget = "back" }) {
   if (!mePlayerId || !hole || hole.teeLat == null) return null;
   const NEAR_GREEN_YARDS = 30; // inside this range, assume chipping/putting — stop prompting for full shots
 
@@ -2482,7 +2545,7 @@ function computePendingShot({ hole, format, mePlayerId, selected, scores, bbStat
       const extra = cell.extraShots || [];
       anchor = extra.length ? { lat: extra[extra.length - 1].lat, lon: extra[extra.length - 1].lon } : { lat: cell.driveLat, lon: cell.driveLon };
     }
-    const aimGreen = anchor ? greenAimPoint(anchor.lat, anchor.lon, hole) : null;
+    const aimGreen = anchor ? greenAimPoint(anchor.lat, anchor.lon, hole, greenTarget) : null;
     const remaining = aimGreen && anchor ? haversineYards(anchor.lat, anchor.lon, aimGreen.lat, aimGreen.lon) : null;
     if (!isDrive && remaining != null && remaining < NEAR_GREEN_YARDS) return null;
     return { kind: "stroke", hole, anchor, isDrive };
@@ -2509,7 +2572,7 @@ function computePendingShot({ hole, format, mePlayerId, selected, scores, bbStat
     ? (s.rounds[0][driveLatField] != null ? { lat: s.rounds[0][driveLatField], lon: s.rounds[0][driveLonField] } : { lat: hole.teeLat, lon: hole.teeLon })
     : (s.rounds[roundIndex - 1].lat != null ? { lat: s.rounds[roundIndex - 1].lat, lon: s.rounds[roundIndex - 1].lon } : null);
   if (!anchor) return null;
-  const aimGreen = greenAimPoint(anchor.lat, anchor.lon, hole);
+  const aimGreen = greenAimPoint(anchor.lat, anchor.lon, hole, greenTarget);
   const remaining = aimGreen ? haversineYards(anchor.lat, anchor.lon, aimGreen.lat, aimGreen.lon) : null;
   if (remaining != null && remaining < NEAR_GREEN_YARDS) return null;
   return { kind: "bb", hole, teamKey, who, anchor, isDrive: false, roundIndex };
@@ -2527,9 +2590,9 @@ function bbHoleScore(state) {
   return pre + Math.min(a, b);
 }
 
-function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, playerBName, playerAId, playerBId, state, onUpdate, onMarkDrive, onMarkShot, livePos, distanceUnit, mePlayerId, meBag, course, teeAssign }) {
+function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, playerBName, playerAId, playerBId, state, onUpdate, onMarkDrive, onMarkShot, livePos, distanceUnit, mePlayerId, meBag, course, teeAssign, greenTarget = "back" }) {
   const s = state || defaultBBHole();
-  const aimGreen = livePos ? greenAimPoint(livePos.lat, livePos.lon, hole) : null;
+  const aimGreen = livePos ? greenAimPoint(livePos.lat, livePos.lon, hole, greenTarget) : null;
   const remainingYards = aimGreen && livePos ? haversineYards(livePos.lat, livePos.lon, aimGreen.lat, aimGreen.lon) : null;
   const suggestion = meBag?.length > 0 ? suggestClub(meBag, remainingYards) : null;
   const unitLabel = distanceUnit === "m" ? "m" : "y";
@@ -2714,9 +2777,9 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
    BetterBallHoleCard(s) side by side underneath, plus the same Next/Finish hole button. */
 function BetterBallFocusedHole({
   hole, isLast, solo, pA1, pB1, pA2, pB2, team1Ids, team2Ids, bbState, distanceUnit, livePos,
-  mePlayerId, mePlayer, course, teeAssign, onUpdateTeam1, onUpdateTeam2, onMarkDrive1, onMarkShot1, onMarkDrive2, onMarkShot2, onNext,
+  mePlayerId, mePlayer, course, teeAssign, greenTarget = "back", onSetGreenTarget, onUpdateTeam1, onUpdateTeam2, onMarkDrive1, onMarkShot1, onMarkDrive2, onMarkShot2, onNext,
 }) {
-  const aimGreen = livePos ? greenAimPoint(livePos.lat, livePos.lon, hole) : null;
+  const aimGreen = livePos ? greenAimPoint(livePos.lat, livePos.lon, hole, greenTarget) : null;
   const liveYards = aimGreen && livePos ? haversineYards(livePos.lat, livePos.lon, aimGreen.lat, aimGreen.lon) : null;
   const unitLabel = distanceUnit === "m" ? "m" : "y";
   return (
@@ -2732,7 +2795,10 @@ function BetterBallFocusedHole({
         <div style={{ textAlign: "right", fontFamily: sans, fontSize: 12, color: C.turf, flexShrink: 0 }}>
           {hole.yardage ? <div>{displayDistance(hole.yardage, distanceUnit)}{unitLabel}</div> : null}
           {liveYards != null && (
-            <div style={{ color: C.fairway, fontWeight: 700 }}>📍 {Math.round(displayDistance(liveYards, distanceUnit))}{unitLabel}</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end", marginTop: 2 }}>
+              {hole.greenPolygon?.length > 0 && <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} />}
+              <div style={{ color: C.fairway, fontWeight: 700 }}>📍 {Math.round(displayDistance(liveYards, distanceUnit))}{unitLabel}</div>
+            </div>
           )}
         </div>
       </div>
@@ -2743,14 +2809,14 @@ function BetterBallFocusedHole({
           state={bbState.team1?.[hole.number]} onUpdate={onUpdateTeam1}
           onMarkDrive={onMarkDrive1} onMarkShot={onMarkShot1}
           livePos={livePos} distanceUnit={distanceUnit} mePlayerId={mePlayerId} meBag={mePlayer?.bag}
-          course={course} teeAssign={teeAssign} />
+          course={course} teeAssign={teeAssign} greenTarget={greenTarget} />
         {!solo && (
           <BetterBallHoleCard hole={hole} teamKey="team2" teamColor={C.team2} teamLabel="Team 2" playerAName={pA2?.name || "A"} playerBName={pB2?.name || "B"}
             playerAId={team2Ids[0]} playerBId={team2Ids[1]}
             state={bbState.team2?.[hole.number]} onUpdate={onUpdateTeam2}
             onMarkDrive={onMarkDrive2} onMarkShot={onMarkShot2}
             livePos={livePos} distanceUnit={distanceUnit} mePlayerId={mePlayerId} meBag={mePlayer?.bag}
-            course={course} teeAssign={teeAssign} />
+            course={course} teeAssign={teeAssign} greenTarget={greenTarget} />
         )}
       </div>
 
@@ -2764,8 +2830,8 @@ function BetterBallFocusedHole({
 /* single "focused" hole in the per-hole stroke-play scoring view — occupies most of the
    screen while active; one compact card per selected player inside it. Direction/putts and
    shot-marking sit side by side as equal-width flex columns so neither overflows the card. */
-function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit, livePos, mePlayer, course, teeAssign, onScoreField, onMarkDrive, onMarkNextShot, onNext }) {
-  const aimGreen = livePos ? greenAimPoint(livePos.lat, livePos.lon, hole) : null;
+function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit, livePos, mePlayer, course, teeAssign, greenTarget = "back", onSetGreenTarget, onScoreField, onMarkDrive, onMarkNextShot, onNext }) {
+  const aimGreen = livePos ? greenAimPoint(livePos.lat, livePos.lon, hole, greenTarget) : null;
   const liveYards = aimGreen && livePos ? haversineYards(livePos.lat, livePos.lon, aimGreen.lat, aimGreen.lon) : null;
   const suggestion = liveYards != null && mePlayer?.bag?.length ? suggestClub(mePlayer.bag, liveYards) : null;
   const unitLabel = distanceUnit === "m" ? "m" : "y";
@@ -2788,7 +2854,10 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
         <div style={{ textAlign: "right", fontFamily: sans, fontSize: 12, color: C.turf, flexShrink: 0 }}>
           {hole.yardage ? <div>{displayDistance(hole.yardage, distanceUnit)}{unitLabel}</div> : null}
           {liveYards != null && (
-            <div style={{ color: C.fairway, fontWeight: 700 }}>📍 {Math.round(displayDistance(liveYards, distanceUnit))}{unitLabel}</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end", marginTop: 2 }}>
+              {hole.greenPolygon?.length > 0 && <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} />}
+              <div style={{ color: C.fairway, fontWeight: 700 }}>📍 {Math.round(displayDistance(liveYards, distanceUnit))}{unitLabel}</div>
+            </div>
           )}
           {suggestion && <div style={{ color: C.fairway }}>🎒 {CLUB_ABBREV[suggestion] || suggestion}</div>}
         </div>
@@ -2910,6 +2979,12 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
      back to tees[0] anyway via teeIdFor() — resetting avoids carrying a same-shaped-but-wrong id
      across courses. */
   const [teeAssign, setTeeAssign] = useState(savedRound?.teeAssign || {});
+  /* front/back-of-green toggle, 14 Aug — one shared value for the whole round (not remembered
+     separately per hole, per the user's explicit answer) but changeable "at any given time" from
+     wherever a live green distance is shown (StrokeHoleCard/BetterBallFocusedHole header,
+     DriveMapModal) — see greenAimPoint/GreenTargetToggle. Defaults to "back", matching the
+     back-edge feature's original (pre-toggle) behavior. */
+  const [greenTarget, setGreenTarget] = useState(savedRound?.greenTarget || "back");
   const [bbState, setBbState] = useState(savedRound?.bbState || { team1: {}, team2: {} });
   const [startHole, setStartHole] = useState(savedRound?.startHole || 1);
   const [activeIdx, setActiveIdx] = useState(savedRound?.activeIdx ?? 0);
@@ -2987,8 +3062,8 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
      lose it — only while actively scoring; the setup screen and finished rounds don't persist */
   useEffect(() => {
     if (step !== "scoring") return;
-    saveKey(ACTIVE_ROUND_KEY, { format, courseId, selected, overrides, scores, teamAssign, teeAssign, bbState, startHole, activeIdx });
-  }, [step, format, courseId, selected, overrides, scores, teamAssign, teeAssign, bbState, startHole, activeIdx]);
+    saveKey(ACTIVE_ROUND_KEY, { format, courseId, selected, overrides, scores, teamAssign, teeAssign, bbState, startHole, activeIdx, greenTarget });
+  }, [step, format, courseId, selected, overrides, scores, teamAssign, teeAssign, bbState, startHole, activeIdx, greenTarget]);
 
   /* tells App() whether a round is actively being scored right now, plus enough to render the
      ribbon's compact header (course name / format) and let its hamburger menu's "Back to
@@ -3062,13 +3137,20 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
   /* --- shot recording: always reads/writes via the functional setState form so these stay
      correct even when called from the voice-caddy callback below, whose own closure is only
      ever created once (see the refs a little further down) --- */
-  function recordStrokeDrive(pid, hole, pos) {
+  /* greenTarget is an explicit param (not read from the enclosing closure) on all four record*
+     functions below, same reasoning as hole/pos already being explicit params: handleVoiceCommand
+     is a useCallback frozen on first render, so any call it makes to these functions must pass
+     freshly-read values in — including greenTargetRef.current (see the voice-caddy call sites
+     below) rather than relying on the component's current-render `greenTarget` state, which that
+     particular closure would otherwise never see update. Every other caller (defined fresh each
+     render, e.g. markDriveForStroke/openAutoShotModal) just passes the live `greenTarget` state. */
+  function recordStrokeDrive(pid, hole, pos, greenTarget = "back") {
     let result = null;
     setScores((prev) => {
       const cell = prev[pid]?.[hole.number] || {};
       const anchor = hole.teeLat != null ? { lat: hole.teeLat, lon: hole.teeLon } : null;
       const yards = anchor ? haversineYards(anchor.lat, anchor.lon, pos.lat, pos.lon) : null;
-      const aimGreen = greenAimPoint(pos.lat, pos.lon, hole);
+      const aimGreen = greenAimPoint(pos.lat, pos.lon, hole, greenTarget);
       const remaining = aimGreen ? haversineYards(pos.lat, pos.lon, aimGreen.lat, aimGreen.lon) : null;
       result = { label: "Drive", yards, remaining };
       const nextCell = { ...cell, driveYards: yards != null ? Math.round(yards) : null, driveLat: pos.lat, driveLon: pos.lon };
@@ -3076,7 +3158,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
     });
     return result;
   }
-  function recordStrokeNextShot(pid, hole, pos) {
+  function recordStrokeNextShot(pid, hole, pos, greenTarget = "back") {
     let result = null;
     setScores((prev) => {
       const cell = prev[pid]?.[hole.number] || {};
@@ -3089,7 +3171,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
         ? { lat: hole.teeLat, lon: hole.teeLon }
         : null;
       const yards = prevPt ? haversineYards(prevPt.lat, prevPt.lon, pos.lat, pos.lon) : null;
-      const aimGreen = greenAimPoint(pos.lat, pos.lon, hole);
+      const aimGreen = greenAimPoint(pos.lat, pos.lon, hole, greenTarget);
       const remaining = aimGreen ? haversineYards(pos.lat, pos.lon, aimGreen.lat, aimGreen.lon) : null;
       result = { label: `Shot ${extra.length + 2}`, yards, remaining };
       const nextExtra = [...extra, { yards: yards != null ? Math.round(yards) : null, lat: pos.lat, lon: pos.lon, club: null }];
@@ -3097,7 +3179,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
     });
     return result;
   }
-  function recordBBDrive(teamKey, who, hole, pos) {
+  function recordBBDrive(teamKey, who, hole, pos, greenTarget = "back") {
     let result = null;
     setBbState((prev) => {
       const s = prev[teamKey]?.[hole.number] || defaultBBHole();
@@ -3107,7 +3189,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
       const driveYardsField = who === "A" ? "driveYardsA" : "driveYardsB";
       const anchor = hole.teeLat != null ? { lat: hole.teeLat, lon: hole.teeLon } : null;
       const yards = anchor ? haversineYards(anchor.lat, anchor.lon, pos.lat, pos.lon) : null;
-      const aimGreen = greenAimPoint(pos.lat, pos.lon, hole);
+      const aimGreen = greenAimPoint(pos.lat, pos.lon, hole, greenTarget);
       const remaining = aimGreen ? haversineYards(pos.lat, pos.lon, aimGreen.lat, aimGreen.lon) : null;
       result = { label: "Drive", yards, remaining };
       rounds[0] = { ...rounds[0], [driveYardsField]: yards != null ? Math.round(yards) : null, [driveLatField]: pos.lat, [driveLonField]: pos.lon };
@@ -3118,7 +3200,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
   /* marks the shot at an explicit round index — used both by the manual per-round "Mark shot"
      button (which already knows exactly which round it's for) and, via computePendingShot's
      roundIndex, by the auto-detect/voice paths */
-  function recordBBShotAtRound(teamKey, who, hole, roundIndex, pos) {
+  function recordBBShotAtRound(teamKey, who, hole, roundIndex, pos, greenTarget = "back") {
     let result = null;
     setBbState((prev) => {
       const s = prev[teamKey]?.[hole.number] || defaultBBHole();
@@ -3134,7 +3216,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
         ? { lat: rounds[roundIndex - 1].lat, lon: rounds[roundIndex - 1].lon }
         : null;
       const yards = anchor ? haversineYards(anchor.lat, anchor.lon, pos.lat, pos.lon) : null;
-      const aimGreen = greenAimPoint(pos.lat, pos.lon, hole);
+      const aimGreen = greenAimPoint(pos.lat, pos.lon, hole, greenTarget);
       const remaining = aimGreen ? haversineYards(pos.lat, pos.lon, aimGreen.lat, aimGreen.lon) : null;
       result = { label: `Shot ${roundIndex + 1}`, yards, remaining };
       rounds[roundIndex] = { ...rounds[roundIndex], shotYards: yards != null ? Math.round(yards) : null, lat: pos.lat, lon: pos.lon };
@@ -3174,6 +3256,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
   const team2IdsRef = useRef(team2Ids);
   const activeHoleRef = useRef(activeHole);
   const teeAssignRef = useRef(teeAssign);
+  const greenTargetRef = useRef(greenTarget);
   useEffect(() => { mePlayerIdRef.current = mePlayerId; }, [mePlayerId]);
   useEffect(() => { livePosRef.current = livePos; }, [livePos]);
   useEffect(() => { courseRef.current = course; }, [course]);
@@ -3185,6 +3268,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
   useEffect(() => { team1IdsRef.current = team1Ids; });
   useEffect(() => { team2IdsRef.current = team2Ids; });
   useEffect(() => { teeAssignRef.current = teeAssign; }, [teeAssign]);
+  useEffect(() => { greenTargetRef.current = greenTarget; }, [greenTarget]);
 
   const handleVoiceCommand = useCallback((kind, payload, transcript) => {
     if (kind === "error") {
@@ -3251,17 +3335,17 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
       const pending = computePendingShot({
         hole: holeForMe, format: formatRef.current, mePlayerId: me, selected: selectedRef.current,
         scores: scoresRef.current, bbState: bbStateRef.current,
-        team1Ids: team1IdsRef.current, team2Ids: team2IdsRef.current,
+        team1Ids: team1IdsRef.current, team2Ids: team2IdsRef.current, greenTarget: greenTargetRef.current,
       });
       if (!pending) { setVoiceMsg('Heard "record shot" but there\'s nothing pending to mark for you right now.'); speak("Nothing to record right now."); return; }
       const posArg = { lat: pos.lat, lon: pos.lon };
       let result;
       if (pending.kind === "stroke") {
-        result = pending.isDrive ? recordStrokeDrive(me, holeForMe, posArg) : recordStrokeNextShot(me, holeForMe, posArg);
+        result = pending.isDrive ? recordStrokeDrive(me, holeForMe, posArg, greenTargetRef.current) : recordStrokeNextShot(me, holeForMe, posArg, greenTargetRef.current);
       } else {
         result = pending.isDrive
-          ? recordBBDrive(pending.teamKey, pending.who, holeForMe, posArg)
-          : recordBBShotAtRound(pending.teamKey, pending.who, holeForMe, pending.roundIndex, posArg);
+          ? recordBBDrive(pending.teamKey, pending.who, holeForMe, posArg, greenTargetRef.current)
+          : recordBBShotAtRound(pending.teamKey, pending.who, holeForMe, pending.roundIndex, posArg, greenTargetRef.current);
       }
       announceShotResult(result, { speakAloud: true });
     }
@@ -3275,7 +3359,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
   const myTeeHole = activeHole ? getTeeHole(course, teeIdFor(mePlayerId), activeHole.number) : null;
   const currentHoleForMe = activeHole ? { ...activeHole, teeLat: myTeeHole.teeLat, teeLon: myTeeHole.teeLon } : null;
   const myPending = step === "scoring"
-    ? computePendingShot({ hole: currentHoleForMe, format, mePlayerId, selected, scores, bbState, team1Ids, team2Ids })
+    ? computePendingShot({ hole: currentHoleForMe, format, mePlayerId, selected, scores, bbState, team1Ids, team2Ids, greenTarget })
     : null;
   const shotDetector = useShotStopDetector(step === "scoring" && !!myPending, livePos, myPending?.anchor || null);
 
@@ -3291,10 +3375,10 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
       onSave: (yd, lat, lng) => {
         const posArg = { lat, lon: lng };
         const result = pending.kind === "stroke"
-          ? pending.isDrive ? recordStrokeDrive(mePlayerId, pending.hole, posArg) : recordStrokeNextShot(mePlayerId, pending.hole, posArg)
+          ? pending.isDrive ? recordStrokeDrive(mePlayerId, pending.hole, posArg, greenTarget) : recordStrokeNextShot(mePlayerId, pending.hole, posArg, greenTarget)
           : pending.isDrive
-          ? recordBBDrive(pending.teamKey, pending.who, pending.hole, posArg)
-          : recordBBShotAtRound(pending.teamKey, pending.who, pending.hole, pending.roundIndex, posArg);
+          ? recordBBDrive(pending.teamKey, pending.who, pending.hole, posArg, greenTarget)
+          : recordBBShotAtRound(pending.teamKey, pending.who, pending.hole, pending.roundIndex, posArg, greenTarget);
         announceShotResult(result, { speakAloud: voiceOn });
         setDriveModal(null);
         shotDetector.reset();
@@ -3529,7 +3613,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
         label: players.find((p) => p.id === pid)?.name || "Player",
         shotLabel: "drive",
         onSave: (yd, lat, lng) => {
-          const result = recordStrokeDrive(pid, hForP, { lat, lon: lng });
+          const result = recordStrokeDrive(pid, hForP, { lat, lon: lng }, greenTarget);
           if (pid === mePlayerId) announceShotResult(result, { speakAloud: false });
           setDriveModal(null);
         },
@@ -3549,7 +3633,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
         shotLabel: "next shot",
         fromLat: prevPt?.lat, fromLon: prevPt?.lon,
         onSave: (yd, lat, lng) => {
-          const result = recordStrokeNextShot(pid, hForP, { lat, lon: lng });
+          const result = recordStrokeNextShot(pid, hForP, { lat, lon: lng }, greenTarget);
           if (pid === mePlayerId) announceShotResult(result, { speakAloud: false });
           setDriveModal(null);
         },
@@ -3595,6 +3679,8 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
             mePlayer={mePlayer}
             course={course}
             teeAssign={teeAssign}
+            greenTarget={greenTarget}
+            onSetGreenTarget={setGreenTarget}
             onScoreField={setScoreField}
             onMarkDrive={markDriveForStroke}
             onMarkNextShot={markNextShotForStroke}
@@ -3683,6 +3769,8 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
             fromLon={driveModal.fromLon}
             initialPos={driveModal.initialPos}
             distanceUnit={distanceUnit}
+            greenTarget={greenTarget}
+            onSetGreenTarget={setGreenTarget}
             onCancel={() => setDriveModal(null)}
             onSave={driveModal.onSave}
           />
@@ -3718,7 +3806,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
       label: playerName || "Player",
       shotLabel: "drive",
       onSave: (yd, lat, lng) => {
-        const result = recordBBDrive(teamKey, who, hForP, { lat, lon: lng });
+        const result = recordBBDrive(teamKey, who, hForP, { lat, lon: lng }, greenTarget);
         if (pid === mePlayerId) announceShotResult(result, { speakAloud: false });
         setDriveModal(null);
       },
@@ -3744,7 +3832,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
       shotLabel: `shot ${roundIndex + 1}`,
       fromLat: anchor?.lat, fromLon: anchor?.lon,
       onSave: (yd, lat, lng) => {
-        const result = recordBBShotAtRound(teamKey, who, hForP, roundIndex, { lat, lon: lng });
+        const result = recordBBShotAtRound(teamKey, who, hForP, roundIndex, { lat, lon: lng }, greenTarget);
         if (pid === mePlayerId) announceShotResult(result, { speakAloud: false });
         setDriveModal(null);
       },
@@ -3788,6 +3876,8 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
           mePlayer={mePlayer}
           course={course}
           teeAssign={teeAssign}
+          greenTarget={greenTarget}
+          onSetGreenTarget={setGreenTarget}
           onUpdateTeam1={(s) => updateBB("team1", h.number, s)}
           onUpdateTeam2={(s) => updateBB("team2", h.number, s)}
           onMarkDrive1={(who) => markDriveForBB("team1", h, who, bbState.team1?.[h.number], who === "A" ? pA1?.name : pB1?.name)}
@@ -3877,6 +3967,8 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
           fromLon={driveModal.fromLon}
           initialPos={driveModal.initialPos}
           distanceUnit={distanceUnit}
+          greenTarget={greenTarget}
+          onSetGreenTarget={setGreenTarget}
           onCancel={() => setDriveModal(null)}
           onSave={driveModal.onSave}
         />
