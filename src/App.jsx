@@ -2518,7 +2518,7 @@ function PlayersTab({ players, setPlayers, distanceUnit, mePlayerId, setMePlayer
 
 /* ================= BETTER BALL HOLE CARD ================= */
 function defaultBBHole() {
-  return { rounds: [{ continueWith: null, shapeA: null, shapeB: null }], onGreen: false, puttMode: null, betterPutts: "", ownPutts: { A: "", B: "" } };
+  return { rounds: [{ continueWith: null, shapeA: null, shapeB: null, penaltyA: null, penaltyB: null, penalty: null }], onGreen: false, puttMode: null, betterPutts: "", ownPutts: { A: "", B: "" } };
 }
 
 /* Works out, for whichever player is marked ⭐ "you", which shot (if any) is next to record —
@@ -2577,9 +2577,26 @@ function computePendingShot({ hole, format, mePlayerId, selected, scores, bbStat
   if (remaining != null && remaining < NEAR_GREEN_YARDS) return null;
   return { kind: "bb", hole, teamKey, who, anchor, isDrive: false, roundIndex };
 }
+/* penalty strokes actually counting toward the score (15 Aug) — for round 0 (the tee shot,
+   where BOTH players' drives are recorded together in one entry) only the ball the team ended
+   up continuing with matters: if the non-continuing player's drive was penalized, that ball was
+   abandoned anyway and its penalty shouldn't inflate the score. For every later round only one
+   player's shot is ever tracked, so its own `penalty` field always applies directly. */
+function bbPenaltyStrokes(rounds) {
+  let n = 0;
+  (rounds || []).forEach((r, i) => {
+    if (i === 0) {
+      if (r.continueWith === "A" && r.penaltyA) n += 1;
+      if (r.continueWith === "B" && r.penaltyB) n += 1;
+    } else if (r.penalty) {
+      n += 1;
+    }
+  });
+  return n;
+}
 function bbHoleScore(state) {
   if (!state || !state.onGreen || !state.puttMode) return null;
-  const pre = state.rounds.length;
+  const pre = state.rounds.length + bbPenaltyStrokes(state.rounds);
   /* checks use "entered at all" (not blank/null) rather than truthy, since a hole-out or
      chip-in is a legitimate 0-putt entry (15 Aug) — `!putts`/`!a`/`!b` would wrongly treat a
      real "0" as "not entered yet" and hide the score. */
@@ -2631,9 +2648,76 @@ function PuttPickerModal({ title, onSelect, onClose }) {
   );
 }
 
+/* Penalty-stroke recording (15 Aug) — attached per shot (not per hole), per the user's own
+   choice: "the drive went OB" and "the approach found water" need to read as two different
+   things. Each shot-recording site (Stroke Play's drive + each extra shot; Better Ball's round-0
+   drive per player + each later approach round) gets its own small badge button that opens this
+   picker. Picking a type — or "Remove penalty" to clear one — is round-tripped through the
+   caller, which is responsible for adding/removing the +1 stroke (see applyStrokePenalty in
+   StrokeHoleCard and the penalty-aware bbHoleScore/bbPenaltyStrokes for Better Ball) so the
+   score reflects it immediately rather than relying on the user to remember to account for it
+   themselves. */
+const PENALTY_TYPES = [
+  { key: "OB", label: "OB", desc: "Out of bounds" },
+  { key: "HZ", label: "HZ", desc: "Water hazard" },
+  { key: "UP", label: "UP", desc: "Unplayable" },
+  { key: "LB", label: "LB", desc: "Lost ball" },
+];
+function PenaltyPickerModal({ title, value, onSelect, onClose }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(20,20,16,0.55)", zIndex: 1100, display: "flex", alignItems: "center", justifyContent: "center", padding: 14 }} onClick={onClose}>
+      <div style={{ background: C.paper, borderRadius: 10, padding: 18, width: "100%", maxWidth: 320 }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ fontFamily: serif, fontSize: 16, color: C.fairway, marginBottom: 4, textAlign: "center" }}>{title}</div>
+        <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, marginBottom: 12, textAlign: "center" }}>Adds 1 penalty stroke to this hole</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10 }}>
+          {PENALTY_TYPES.map((p) => (
+            <button
+              key={p.key}
+              onClick={() => onSelect(p.key)}
+              style={{
+                fontFamily: sans, fontSize: 13, fontWeight: 700, padding: "14px 8px", borderRadius: 8, cursor: "pointer",
+                border: `1.5px solid ${value === p.key ? C.flag : C.line}`,
+                background: value === p.key ? C.flag : C.white,
+                color: value === p.key ? C.white : C.ink,
+                display: "flex", flexDirection: "column", gap: 3, alignItems: "center",
+              }}
+            >
+              <span style={{ fontSize: 16 }}>{p.label}</span>
+              <span style={{ fontSize: 9.5, fontWeight: 500, opacity: 0.85 }}>{p.desc}</span>
+            </button>
+          ))}
+        </div>
+        {value && (
+          <button style={{ ...btnGhost, width: "100%", marginTop: 10, boxSizing: "border-box", borderColor: C.flag, color: C.flag }} onClick={() => onSelect(null)}>
+            Remove penalty
+          </button>
+        )}
+        <button style={{ ...btnGhost, width: "100%", marginTop: 8, boxSizing: "border-box" }} onClick={onClose}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+function PenaltyBadgeButton({ value, onClick, label = "+ Penalty" }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        fontSize: 9.5, fontFamily: sans, fontWeight: 700, padding: "3px 7px", borderRadius: 4, cursor: "pointer",
+        border: `1px solid ${value ? C.flag : C.line}`,
+        background: value ? C.flag : C.white,
+        color: value ? C.white : C.turf,
+        flexShrink: 0, whiteSpace: "nowrap",
+      }}
+    >
+      {value ? `⚠ ${value}` : label}
+    </button>
+  );
+}
+
 function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, playerBName, playerAId, playerBId, state, onUpdate, onMarkDrive, onMarkShot, livePos, distanceUnit, mePlayerId, meBag, course, teeAssign, greenTarget = "back" }) {
   const s = state || defaultBBHole();
   const [puttPickerFor, setPuttPickerFor] = useState(null); // null | "A" | "B"
+  const [penaltyTarget, setPenaltyTarget] = useState(null); // null | { roundIdx, who: "A"|"B"|null }
   const aimGreen = livePos ? greenAimPoint(livePos.lat, livePos.lon, hole, greenTarget) : null;
   const remainingYards = aimGreen && livePos ? haversineYards(livePos.lat, livePos.lon, aimGreen.lat, aimGreen.lon) : null;
   const suggestion = meBag?.length > 0 ? suggestClub(meBag, remainingYards) : null;
@@ -2657,7 +2741,7 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
     patch({ rounds });
   }
   function addRound() {
-    patch({ rounds: [...s.rounds, { continueWith: null, shapeA: null, shapeB: null }] });
+    patch({ rounds: [...s.rounds, { continueWith: null, shapeA: null, shapeB: null, penaltyA: null, penaltyB: null, penalty: null }] });
   }
   function removeLastRound() {
     if (s.rounds.length <= 1) return;
@@ -2731,6 +2815,9 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
                       {playerAId === mePlayerId && suggestion && !r.clubA && (
                         <div style={{ fontSize: 10, color: C.fairway, fontWeight: 700, marginTop: 2 }}>🎒 {suggestion}?</div>
                       )}
+                      <div style={{ marginTop: 4 }}>
+                        <PenaltyBadgeButton value={r.penaltyA} onClick={() => setPenaltyTarget({ roundIdx: i, who: "A" })} />
+                      </div>
                     </div>
                     <div>
                       {playerBName}
@@ -2755,6 +2842,9 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
                       {playerBId === mePlayerId && suggestion && !r.clubB && (
                         <div style={{ fontSize: 10, color: C.fairway, fontWeight: 700, marginTop: 2 }}>🎒 {suggestion}?</div>
                       )}
+                      <div style={{ marginTop: 4 }}>
+                        <PenaltyBadgeButton value={r.penaltyB} onClick={() => setPenaltyTarget({ roundIdx: i, who: "B" })} />
+                      </div>
                     </div>
                   </div>
                 )}
@@ -2778,6 +2868,7 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
                       {hitId === mePlayerId && suggestion && !r.club && (
                         <span style={{ fontSize: 10, color: C.fairway, fontWeight: 700 }}>🎒 {suggestion}?</span>
                       )}
+                      <PenaltyBadgeButton value={r.penalty} onClick={() => setPenaltyTarget({ roundIdx: i, who: null })} />
                     </div>
                   );
                 })()}
@@ -2873,6 +2964,24 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
           onClose={() => setPuttPickerFor(null)}
         />
       )}
+      {penaltyTarget && (() => {
+        const round = s.rounds[penaltyTarget.roundIdx];
+        const field = penaltyTarget.who === "A" ? "penaltyA" : penaltyTarget.who === "B" ? "penaltyB" : "penalty";
+        const currentValue = round?.[field];
+        const whoName = penaltyTarget.who === "A" ? playerAName : penaltyTarget.who === "B" ? playerBName : null;
+        const shotLabel = penaltyTarget.roundIdx === 0 ? "drive" : `shot ${penaltyTarget.roundIdx + 1}`;
+        return (
+          <PenaltyPickerModal
+            title={`${whoName ? whoName + " — " : ""}penalty on ${shotLabel}, hole ${hole.number}`}
+            value={currentValue}
+            onSelect={(type) => {
+              patchRound(penaltyTarget.roundIdx, { [field]: type });
+              setPenaltyTarget(null);
+            }}
+            onClose={() => setPenaltyTarget(null)}
+          />
+        );
+      })()}
     </div>
   );
 }
@@ -2936,6 +3045,8 @@ function BetterBallFocusedHole({
    screen while active; one compact card per selected player inside it. Direction/putts and
    shot-marking sit side by side as equal-width flex columns so neither overflows the card. */
 function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit, livePos, mePlayer, course, teeAssign, greenTarget = "back", onSetGreenTarget, onScoreField, onMarkDrive, onMarkNextShot, onNext }) {
+  const [puttPickerForPid, setPuttPickerForPid] = useState(null); // 15 Aug — same tap-only picker as Better Ball, applied here too
+  const [penaltyTarget, setPenaltyTarget] = useState(null); // null | { pid, kind: "drive" } | { pid, kind: "extra", idx }
   const aimGreen = livePos ? greenAimPoint(livePos.lat, livePos.lon, hole, greenTarget) : null;
   const liveYards = aimGreen && livePos ? haversineYards(livePos.lat, livePos.lon, aimGreen.lat, aimGreen.lon) : null;
   const suggestion = liveYards != null && mePlayer?.bag?.length ? suggestClub(mePlayer.bag, liveYards) : null;
@@ -2945,6 +3056,31 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
      differ meaningfully — is shown under their name instead of repeating the shared header */
   const courseTees = course ? getCourseTees(course) : [];
   const defaultTeeId = courseTees[0]?.id;
+
+  /* Penalty strokes (15 Aug) auto-adjust the manually-typed gross score by ±1 the moment a
+     penalty is added/removed on a shot — switching between penalty TYPES on an already-penalized
+     shot doesn't change the count again, only the none<->something transition does. This mirrors
+     the "auto-add a stroke" behavior the user asked for, so nobody has to remember to bump gross
+     themselves; gross remains the editable source of truth afterward, same as always. */
+  function applyStrokePenalty(pid, target, newType) {
+    const cell = scores[pid]?.[hole.number] || {};
+    const extraShots = cell.extraShots || [];
+    const wasSet = target.kind === "drive" ? !!cell.drivePenalty : !!extraShots[target.idx]?.penalty;
+    const willBeSet = !!newType;
+    if (target.kind === "drive") {
+      onScoreField(pid, hole.number, "drivePenalty", newType);
+    } else {
+      const next = [...extraShots];
+      next[target.idx] = { ...next[target.idx], penalty: newType };
+      onScoreField(pid, hole.number, "extraShots", next);
+    }
+    if (wasSet !== willBeSet) {
+      const currentGross = cell.gross === "" || cell.gross == null ? 0 : Number(cell.gross);
+      const delta = willBeSet ? 1 : -1;
+      onScoreField(pid, hole.number, "gross", String(Math.max(0, currentGross + delta)));
+    }
+    setPenaltyTarget(null);
+  }
 
   return (
     <div style={{ padding: 12, background: C.white }}>
@@ -3007,12 +3143,12 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
                   <ShapeSelector par={hole.par} value={cell.shape} onChange={(v) => onScoreField(pid, hole.number, "shape", v)} />
                   <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
                     <span style={{ fontSize: 11, color: C.turf, fontFamily: sans }}>Putts</span>
-                    <input
-                      type="number"
-                      style={{ width: 38, padding: "4px 5px", fontFamily: mono, fontSize: 13, border: `1px solid ${C.line}`, borderRadius: 4, boxSizing: "border-box" }}
-                      value={cell.putts ?? ""}
-                      onChange={(e) => onScoreField(pid, hole.number, "putts", e.target.value)}
-                    />
+                    <button
+                      onClick={() => setPuttPickerForPid(pid)}
+                      style={{ width: 38, padding: "4px 5px", fontFamily: mono, fontSize: 13, fontWeight: 700, border: `1px solid ${C.line}`, borderRadius: 4, boxSizing: "border-box", background: C.white, color: C.ink, cursor: "pointer" }}
+                    >
+                      {cell.putts !== "" && cell.putts != null ? cell.putts : "—"}
+                    </button>
                   </div>
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
@@ -3030,8 +3166,17 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
                     <option value="">Club —</option>
                     {CLUBS.map((c) => <option key={c} value={c}>{CLUB_ABBREV[c] || c}</option>)}
                   </select>
+                  {/* drive penalty — not gated on hole.teeLat like the GPS-driven controls above,
+                      since tagging a penalty doesn't need a marked distance (15 Aug) */}
+                  <div style={{ marginTop: 4 }}>
+                    <PenaltyBadgeButton
+                      value={cell.drivePenalty}
+                      label="+ Penalty (drive)"
+                      onClick={() => setPenaltyTarget({ pid, kind: "drive" })}
+                    />
+                  </div>
                   {hole.teeLat != null && extraShots.map((es, i) => (
-                    <div key={i} style={{ fontSize: 10, color: C.turf, fontFamily: sans, marginTop: 4, display: "flex", alignItems: "center", gap: 4 }}>
+                    <div key={i} style={{ fontSize: 10, color: C.turf, fontFamily: sans, marginTop: 4, display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
                       <span style={{ flexShrink: 0 }}>S{i + 2}: {es.yards != null ? `${Math.round(displayDistance(es.yards, distanceUnit))}${unitLabel}` : "—"}</span>
                       <select
                         style={{ ...inputStyle, flex: 1, minWidth: 0, padding: "2px 3px", fontSize: 10 }}
@@ -3045,6 +3190,11 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
                         <option value="">—</option>
                         {CLUBS.map((c) => <option key={c} value={c}>{CLUB_ABBREV[c] || c}</option>)}
                       </select>
+                      <PenaltyBadgeButton
+                        value={es.penalty}
+                        label={`+ Penalty (S${i + 2})`}
+                        onClick={() => setPenaltyTarget({ pid, kind: "extra", idx: i })}
+                      />
                     </div>
                   ))}
                   {hole.teeLat != null && (
@@ -3058,6 +3208,31 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
           );
         })}
       </div>
+
+      {puttPickerForPid && (
+        <PuttPickerModal
+          title={`${players.find((p) => p.id === puttPickerForPid)?.name || "Player"} — putts on hole ${hole.number}`}
+          onSelect={(n) => {
+            onScoreField(puttPickerForPid, hole.number, "putts", String(n));
+            setPuttPickerForPid(null);
+          }}
+          onClose={() => setPuttPickerForPid(null)}
+        />
+      )}
+      {penaltyTarget && (() => {
+        const cell = scores[penaltyTarget.pid]?.[hole.number] || {};
+        const currentValue = penaltyTarget.kind === "drive" ? cell.drivePenalty : (cell.extraShots || [])[penaltyTarget.idx]?.penalty;
+        const playerName = players.find((p) => p.id === penaltyTarget.pid)?.name || "Player";
+        const shotLabel = penaltyTarget.kind === "drive" ? "drive" : `shot ${penaltyTarget.idx + 2}`;
+        return (
+          <PenaltyPickerModal
+            title={`${playerName} — penalty on ${shotLabel}, hole ${hole.number}`}
+            value={currentValue}
+            onSelect={(type) => applyStrokePenalty(penaltyTarget.pid, penaltyTarget, type)}
+            onClose={() => setPenaltyTarget(null)}
+          />
+        );
+      })()}
 
       <button style={{ ...btnPrimary, width: "100%", marginTop: 12, boxSizing: "border-box" }} onClick={onNext}>
         {isLast ? "Finish hole →" : "Next hole →"}
@@ -3517,7 +3692,12 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
         const cell = scores[pid]?.[h.number] || {};
         const g = Number(cell.gross) || 0;
         gross += g;
-        holesObj[h.number] = { gross: cell.gross ?? "", shape: cell.shape ?? null, putts: cell.putts ?? "", driveYards: cell.driveYards ?? null, club: cell.club ?? null };
+        /* extraShots and drivePenalty weren't being carried into history at all before 15 Aug —
+           a pre-existing gap that would have silently dropped any penalty tagged on a shot
+           beyond the drive the moment the round was saved. Fixed here so the new per-shot
+           penalty feature (and the "Other shots" column, which already reads extraShots in
+           RoundDetailStroke) actually persists. */
+        holesObj[h.number] = { gross: cell.gross ?? "", shape: cell.shape ?? null, putts: cell.putts ?? "", driveYards: cell.driveYards ?? null, club: cell.club ?? null, drivePenalty: cell.drivePenalty ?? null, extraShots: cell.extraShots || [] };
         const pIdx = updatedPlayers.findIndex((p) => p.id === pid);
         if (pIdx >= 0 && cell.shape) {
           updatedPlayers[pIdx].shotStats.push({ date, courseName: course.name, par: h.par, shape: cell.shape });
@@ -4136,6 +4316,15 @@ function bbPlayerUsageStats(holeDetails) {
       const who = rounds[i - 1].continueWith;
       if (who === "A" || who === "B") stats.shots[who] += 1;
     }
+    // penalty strokes count as real shots too (15 Aug) — same attribution rule as
+    // bbPenaltyStrokes: round 0's penalty only counts for whichever ball actually continued,
+    // every later round's penalty always belongs to that round's one tracked player
+    if (rounds[0].continueWith === "A" && rounds[0].penaltyA) stats.shots.A += 1;
+    if (rounds[0].continueWith === "B" && rounds[0].penaltyB) stats.shots.B += 1;
+    for (let i = 1; i < rounds.length; i++) {
+      const who = rounds[i - 1].continueWith;
+      if ((who === "A" || who === "B") && rounds[i].penalty) stats.shots[who] += 1;
+    }
     if (detail.puttMode) {
       const lastWho = rounds[rounds.length - 1].continueWith;
       if (lastWho === "A" || lastWho === "B") stats.onGreen[lastWho] += 1;
@@ -4205,6 +4394,15 @@ function RoundDetailStroke({ round, players, courseHoles, distanceUnit }) {
           { name: "Right", value: stats.shapeCounts.right || 0 },
         ].filter((d) => d.value > 0);
         const pieColors = { Fairway: C.turf, Left: C.flag, Right: C.brass };
+        /* total penalty strokes across the round (15 Aug) — each penalized shot (drive or any
+           extra shot) already had its +1 folded into that hole's gross the moment it was tagged
+           (see applyStrokePenalty), so this is purely an informational summary, not a further
+           score adjustment. */
+        const penaltyCount = Object.values(s?.holes || {}).reduce((sum, cell) => {
+          let n = cell.drivePenalty ? 1 : 0;
+          (cell.extraShots || []).forEach((es) => { if (es.penalty) n += 1; });
+          return sum + n;
+        }, 0);
         return (
           <div key={pid} style={{ border: `1px solid ${C.line}`, borderRadius: 8, padding: 12 }}>
             <div style={{ fontFamily: serif, fontSize: 15, color: C.fairway, marginBottom: 8 }}>{player?.name || "?"}</div>
@@ -4222,12 +4420,16 @@ function RoundDetailStroke({ round, players, courseHoles, distanceUnit }) {
                         <td style={tdStyle}>{hPar ?? "—"}</td>
                         <td style={tdStyle}><ScoreBadge gross={cell.gross} par={hPar} /></td>
                         <td style={tdStyle}>{cell.putts || "—"}</td>
-                        <td style={tdStyle}>{cell.driveYards ? `${Math.round(displayDistance(cell.driveYards, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : "—"}</td>
+                        <td style={tdStyle}>
+                          {cell.driveYards ? `${Math.round(displayDistance(cell.driveYards, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : "—"}
+                          {cell.drivePenalty && <span style={{ color: C.flag, fontWeight: 700 }}> ⚠{cell.drivePenalty}</span>}
+                        </td>
                         <td style={tdStyle}>{cell.club || "—"}</td>
                         <td style={tdStyle}>
                           {extraShots.length === 0 ? "—" : extraShots.map((es, i) => (
                             <div key={i} style={{ whiteSpace: "nowrap" }}>
                               S{i + 2}: {es.yards != null ? `${Math.round(displayDistance(es.yards, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : "—"}{es.club ? ` (${es.club})` : ""}
+                              {es.penalty && <span style={{ color: C.flag, fontWeight: 700 }}> ⚠{es.penalty}</span>}
                             </div>
                           ))}
                         </td>
@@ -4241,6 +4443,7 @@ function RoundDetailStroke({ round, players, courseHoles, distanceUnit }) {
               Gross <b>{s?.gross}</b> · Net <b>{s?.net}</b> (CH {s?.courseHandicap}) · Putts <b>{stats.totalPutts || "—"}</b>
               {stats.fir != null && <> · FIR <b>{stats.fir}%</b> ({stats.firHit}/{stats.firAttempts})</>}
               {stats.gir != null && <> · GIR <b>{stats.gir}%</b> ({stats.girHit}/{stats.girAttempts})</>}
+              {penaltyCount > 0 && <> · Penalties <b style={{ color: C.flag }}>{penaltyCount}</b></>}
             </div>
             {stats.firAttempts > 0 && (
               /* plain-text fallback for the Fairway/Left/Right breakdown below, always
@@ -4332,16 +4535,18 @@ function BBTeamHistoryBlock({ team, ti, players, courseHoles, distanceUnit }) {
                   <td style={{ ...bbTdStyle, display: "flex", flexWrap: "wrap", gap: 2 }}>
                     {detail?.rounds?.map((rnd, ri) => {
                       const who = rnd.continueWith === "A" ? (pA?.name || "A") : rnd.continueWith === "B" ? (pB?.name || "B") : "—";
-                      let shape = null, driveYd = null, club = null;
+                      let shape = null, driveYd = null, club = null, penalty = null;
                       if (ri === 0) {
                         shape = rnd.continueWith === "A" ? rnd.shapeA : rnd.continueWith === "B" ? rnd.shapeB : null;
                         driveYd = rnd.continueWith === "A" ? rnd.driveYardsA : rnd.continueWith === "B" ? rnd.driveYardsB : null;
                         club = rnd.continueWith === "A" ? rnd.clubA : rnd.continueWith === "B" ? rnd.clubB : null;
+                        penalty = rnd.continueWith === "A" ? rnd.penaltyA : rnd.continueWith === "B" ? rnd.penaltyB : null;
                       } else {
                         driveYd = rnd.shotYards ?? null;
                         club = rnd.club ?? null;
+                        penalty = rnd.penalty ?? null;
                       }
-                      const extra = [club, driveYd ? `${Math.round(displayDistance(driveYd, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : null].filter(Boolean).join(", ");
+                      const extra = [club, driveYd ? `${Math.round(displayDistance(driveYd, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : null, penalty ? `⚠${penalty}` : null].filter(Boolean).join(", ");
                       const label = extra ? `${who} (${extra})` : who;
                       return <ShotChip key={ri} label={label} colorKey={shape} />;
                     })}
