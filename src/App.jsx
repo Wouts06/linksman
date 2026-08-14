@@ -1281,11 +1281,11 @@ function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, d
   );
 }
 
-/* picks readable text color (near-black or white) for a given hex background — used by
-   TeePickerModal to keep each tee's color row legible regardless of how light/dark that tee's
-   own color is (e.g. white/yellow rows need dark text, black/blue/red/green rows need light
-   text). Standard relative-luminance approximation, not full WCAG contrast math — plenty
-   accurate for a handful of fixed preset colors. */
+/* picks readable text color (near-black or white) for a given hex background — used by the
+   per-player tee chips (PlayerTeeChips, below) to keep each selected tee's colored chip legible
+   regardless of how light/dark that tee's own color is (e.g. white/yellow chips need dark text,
+   black/blue/red/green chips need light text). Standard relative-luminance approximation, not
+   full WCAG contrast math — plenty accurate for a handful of fixed preset colors. */
 function readableTextOn(hex) {
   const clean = (hex || "#8A8A8A").replace("#", "");
   const r = parseInt(clean.substring(0, 2), 16) || 0;
@@ -1295,23 +1295,23 @@ function readableTextOn(hex) {
   return luminance > 0.6 ? "#1A1A1A" : "#FFFFFF";
 }
 
-/* Per-player tee-selection screen at round setup — added 13 Aug after the user shared a
-   reference screenshot from another golf app and asked for something in that spirit (not a
-   pixel copy): a full colored list of the course's tees with rating/slope shown, replacing the
-   small inline dropdown that shipped with the original tee-box feature. Also folds in a live
-   playing-handicap preview (Hcp → Allowance → Playing Hcp), which the user specifically asked
-   for and which the app can already compute (courseHandicap() already existed, used at round
-   finish — this just surfaces it earlier, at selection time, using whichever tee is currently
-   highlighted here rather than waiting until the round is scored).
-   Selecting a row updates `pending` immediately (so the preview below reacts live, matching the
-   reference screenshot's checkmark-follows-selection feel) but nothing is actually committed to
-   the round until ✓ is tapped — ✕ (or backdrop tap) discards `pending` and closes without
-   changing the player's existing tee assignment. */
-function TeePickerModal({ player, course, currentTeeId, onConfirm, onCancel }) {
+/* Per-player tee selection at round setup — redesigned 14 Aug after the user liked the look and
+   feel of the 13 Aug TeePickerModal popup above (colored rows, live Hcp → Allowance → Playing
+   Hcp) but reported its entry point — a plain outlined button showing only the current tee —
+   "does not really read as a clickable button." Per the user's explicit direction, the popup is
+   gone: every one of the course's tees now renders directly as its own tappable color chip,
+   side by side, right in the player's card — a segmented control where the choices themselves
+   are the buttons, nothing hidden behind a tap. Selecting a chip is immediate (calls
+   onSelectTee straight away and highlights that chip) — there's no separate confirm/cancel step
+   the way the modal needed one, since nothing is hidden to discard. The Hcp → Allowance →
+   Playing Hcp preview (same math as before) then slides open beneath the chips via a
+   max-height/opacity transition, the same technique already used for the compact-ribbon nav
+   collapse elsewhere in this file — it opens shortly after this row first mounts (i.e. once the
+   player is toggled on), rather than popping in instantly. */
+function PlayerTeeChips({ player, course, teeId, onSelectTee }) {
   const tees = getCourseTees(course);
-  const [pending, setPending] = useState(currentTeeId);
   const [allowance, setAllowance] = useState("100");
-  const selectedTee = tees.find((t) => t.id === pending) || tees[0];
+  const selectedTee = tees.find((t) => t.id === teeId) || tees[0];
   const hi = player ? computeHandicapIndex((player.differentials || []).map((d) => d.value)) : null;
   const par = course ? parTotal(course) : 0;
   const ch = courseHandicap(hi, selectedTee?.slope, selectedTee?.rating, par);
@@ -1320,62 +1320,57 @@ function TeePickerModal({ player, course, currentTeeId, onConfirm, onCancel }) {
   const allowancePct = allowance.trim() === "" ? 100 : Number(allowance);
   const playingHcp = !isNaN(allowancePct) ? Math.round(ch * (allowancePct / 100)) : ch;
 
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setExpanded(true), 20);
+    return () => clearTimeout(t);
+  }, []);
+
   return (
-    <div
-      onClick={onCancel}
-      style={{ position: "fixed", inset: 0, background: "rgba(20,20,16,0.55)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 14 }}
-    >
-      <div onClick={(e) => e.stopPropagation()} style={{ background: C.paper, borderRadius: 10, width: "100%", maxWidth: 420, maxHeight: "92vh", overflow: "hidden", display: "flex", flexDirection: "column" }}>
-        <div style={{ background: C.fairway, color: C.white, padding: "14px 16px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <button onClick={onCancel} style={{ background: "transparent", border: "none", color: C.white, fontSize: 20, cursor: "pointer", padding: 4, lineHeight: 1 }} aria-label="Cancel">✕</button>
-          <div style={{ fontFamily: sans, fontSize: 16, fontWeight: 700 }}>{player?.name || "Player"}</div>
-          <button onClick={() => onConfirm(pending)} style={{ background: "transparent", border: "none", color: C.white, fontSize: 20, cursor: "pointer", padding: 4, lineHeight: 1 }} aria-label="Confirm">✓</button>
-        </div>
-        <div style={{ overflow: "auto", flex: 1 }}>
-          <div style={{ fontFamily: sans, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: C.turf, padding: "12px 16px 4px" }}>Tee</div>
-          {tees.map((t) => {
-            const textColor = readableTextOn(t.color);
-            const isSelected = t.id === pending;
-            return (
-              <button
-                key={t.id}
-                onClick={() => setPending(t.id)}
-                style={{
-                  width: "100%", boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "space-between",
-                  background: t.color, color: textColor, border: "none", borderBottom: `1px solid ${C.line}`,
-                  padding: "14px 16px", cursor: "pointer", fontFamily: sans, textAlign: "left",
-                }}
-              >
-                <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ width: 16, display: "inline-block", fontWeight: 900 }}>{isSelected ? "✓" : ""}</span>
-                  <span style={{ fontSize: 15, fontWeight: 700 }}>{t.name}</span>
-                </span>
-                <span style={{ fontSize: 13, fontFamily: mono }}>
-                  {t.rating != null && t.slope != null ? `${Number(t.rating).toFixed(1)}/${t.slope}` : "—"}
-                </span>
-              </button>
-            );
-          })}
-          <div style={{ padding: "14px 16px", display: "flex", alignItems: "center", gap: 10, borderTop: `1px solid ${C.line}`, marginTop: 4 }}>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, marginBottom: 4 }}>Hcp</div>
-              <div style={{ ...inputStyle, textAlign: "center", fontFamily: mono, fontWeight: 700 }}>{hi != null ? hi.toFixed(1) : "—"}</div>
-            </div>
-            <div style={{ fontSize: 16, color: C.turf, marginTop: 16 }}>→</div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, marginBottom: 4 }}>Allowance</div>
-              <input
-                style={{ ...inputStyle, textAlign: "center", fontFamily: mono }}
-                value={allowance}
-                onChange={(e) => setAllowance(e.target.value.replace(/[^0-9]/g, ""))}
-                inputMode="numeric"
-              />
-            </div>
-            <div style={{ fontSize: 16, color: C.turf, marginTop: 16 }}>→</div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, marginBottom: 4 }}>Playing Hcp</div>
-              <div style={{ ...inputStyle, textAlign: "center", fontFamily: mono, fontWeight: 700, borderColor: C.fairway }}>{playingHcp}</div>
-            </div>
+    <div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {tees.map((t) => {
+          const isSelected = t.id === selectedTee.id;
+          const textColor = readableTextOn(t.color);
+          return (
+            <button
+              key={t.id}
+              onClick={() => onSelectTee(t.id)}
+              style={{
+                display: "flex", alignItems: "center", gap: 6, fontFamily: sans, cursor: "pointer",
+                border: `1.5px solid ${isSelected ? t.color : C.line}`, borderRadius: 6, padding: "6px 10px",
+                background: isSelected ? t.color : C.white, color: isSelected ? textColor : C.ink,
+                fontWeight: isSelected ? 700 : 500, boxShadow: isSelected ? "0 1px 3px rgba(0,0,0,0.18)" : "none",
+                transition: "background 0.15s ease, color 0.15s ease, border-color 0.15s ease",
+              }}
+            >
+              {!isSelected && <span style={{ width: 9, height: 9, borderRadius: "50%", display: "inline-block", background: t.color, border: `1px solid ${C.line}`, flexShrink: 0 }} />}
+              <span style={{ fontSize: 12.5 }}>{t.name}</span>
+            </button>
+          );
+        })}
+      </div>
+      <div style={{ overflow: "hidden", maxHeight: expanded ? 80 : 0, opacity: expanded ? 1 : 0, transition: "max-height 0.28s ease, opacity 0.22s ease" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, paddingTop: 8, borderTop: `1px solid ${C.line}` }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontFamily: sans, fontSize: 10, color: C.turf, marginBottom: 3 }}>Hcp</div>
+            <div style={{ ...inputStyle, padding: "5px 6px", textAlign: "center", fontFamily: mono, fontWeight: 700, fontSize: 13 }}>{hi != null ? hi.toFixed(1) : "—"}</div>
+          </div>
+          <div style={{ fontSize: 14, color: C.turf, marginTop: 12 }}>→</div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontFamily: sans, fontSize: 10, color: C.turf, marginBottom: 3 }}>Allowance</div>
+            <input
+              style={{ ...inputStyle, padding: "5px 6px", textAlign: "center", fontFamily: mono, fontSize: 13 }}
+              value={allowance}
+              onClick={(e) => e.stopPropagation()}
+              onChange={(e) => setAllowance(e.target.value.replace(/[^0-9]/g, ""))}
+              inputMode="numeric"
+            />
+          </div>
+          <div style={{ fontSize: 14, color: C.turf, marginTop: 12 }}>→</div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontFamily: sans, fontSize: 10, color: C.turf, marginBottom: 3 }}>Playing Hcp</div>
+            <div style={{ ...inputStyle, padding: "5px 6px", textAlign: "center", fontFamily: mono, fontWeight: 700, fontSize: 13, borderColor: C.fairway }}>{playingHcp}</div>
           </div>
         </div>
       </div>
@@ -2915,9 +2910,6 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
      back to tees[0] anyway via teeIdFor() — resetting avoids carrying a same-shaped-but-wrong id
      across courses. */
   const [teeAssign, setTeeAssign] = useState(savedRound?.teeAssign || {});
-  /* which player's tee-picker modal (see TeePickerModal) is currently open at round setup —
-     a player id, or null when closed. Not persisted (setup-screen-only, transient UI state). */
-  const [teePickerFor, setTeePickerFor] = useState(null);
   const [bbState, setBbState] = useState(savedRound?.bbState || { team1: {}, team2: {} });
   const [startHole, setStartHole] = useState(savedRound?.startHole || 1);
   const [activeIdx, setActiveIdx] = useState(savedRound?.activeIdx ?? 0);
@@ -3492,18 +3484,14 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
                   </div>
                 </div>
                 {on && courseTees.length > 1 && (
-                  <button
-                    onClick={(e) => { e.stopPropagation(); setTeePickerFor(p.id); }}
-                    style={{
-                      display: "flex", alignItems: "center", gap: 6, marginTop: 8, alignSelf: "flex-start",
-                      background: "transparent", border: `1px solid ${C.line}`, borderRadius: 5,
-                      padding: "5px 9px", cursor: "pointer", fontFamily: sans,
-                    }}
-                  >
-                    <span style={{ width: 9, height: 9, borderRadius: "50%", display: "inline-block", background: courseTees.find((t) => t.id === playerTeeId)?.color || C.turf, border: `1px solid ${C.line}`, flexShrink: 0 }} />
-                    <span style={{ fontSize: 12, color: C.ink, fontWeight: 600 }}>{courseTees.find((t) => t.id === playerTeeId)?.name || "Tee"}</span>
-                    <span style={{ fontSize: 10, color: C.turf }}>▸</span>
-                  </button>
+                  <div onClick={(e) => e.stopPropagation()} style={{ marginTop: 8 }}>
+                    <PlayerTeeChips
+                      player={p}
+                      course={course}
+                      teeId={playerTeeId}
+                      onSelectTee={(teeId) => setPlayerTee(p.id, teeId)}
+                    />
+                  </div>
                 )}
               </div>
             );
@@ -3519,15 +3507,6 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
           <div style={{ fontFamily: sans, fontSize: 12, color: C.flag, marginBottom: 10 }}>Select at least one player above to start.</div>
         )}
         <button style={btnPrimary} disabled={selected.length === 0 || !teamsReady} onClick={beginRound}>Start round →</button>
-        {teePickerFor && (
-          <TeePickerModal
-            player={players.find((p) => p.id === teePickerFor)}
-            course={course}
-            currentTeeId={teeAssign[teePickerFor] || getCourseTees(course)[0]?.id}
-            onConfirm={(teeId) => { setPlayerTee(teePickerFor, teeId); setTeePickerFor(null); }}
-            onCancel={() => setTeePickerFor(null)}
-          />
-        )}
       </div>
     );
   }
