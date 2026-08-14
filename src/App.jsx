@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef, useId } from "react";
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from "recharts";
-import { MapContainer, TileLayer, Marker, CircleMarker, useMapEvents } from "react-leaflet";
+import { MapContainer, TileLayer, Marker, CircleMarker, Polygon, useMapEvents, useMap } from "react-leaflet";
 import L from "leaflet";
 import markerIcon2x from "leaflet/dist/images/marker-icon-2x.png";
 import markerIcon from "leaflet/dist/images/marker-icon.png";
@@ -1450,6 +1450,101 @@ function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, d
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button style={btnGhost} onClick={onCancel}>Cancel</button>
           <button style={btnPrimary} disabled={!pos} onClick={() => onSave(shotYards != null ? Math.round(shotYards) : null, pos.lat, pos.lng, remainYards)}>Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* keeps map dragging disabled while a rotation is applied, same reasoning as MapClickCapture's
+   identical effect above — Leaflet's own drag math assumes an unrotated container, so panning
+   would visually go the "wrong" direction once the view is rotated. Read-only (no click
+   handling) since GreenViewModal below never needs to place a pin. */
+function RotationDragLock({ rotateDeg }) {
+  const map = useMap();
+  useEffect(() => {
+    if (rotateDeg) map.dragging.disable(); else map.dragging.enable();
+    return () => map.dragging.enable();
+  }, [rotateDeg, map]);
+  return null;
+}
+
+/* 16 Aug — a focused, read-only close-up of just the green, requested after the DriveMapModal's
+   "rotate to line" toggle turned out not to be what the user actually wanted there: they liked
+   the rotation itself but wanted it applied to a tight zoomed-in view of the green alone (for
+   planning the approach), not the full tee-to-green overview used for marking a shot. Fits the
+   map to the green polygon's own bounding box (padded slightly) when OpenStreetMap has one for
+   this hole; falls back to a fixed close zoom centered on the hole's single green point when it
+   doesn't (most courses aren't mapped to full-polygon detail). Always rotated so the line from
+   the current position to the green points "up" — no toggle, since that's the entire point of
+   this view (DriveMapModal's separate north-up/line-up toggle is unaffected by this addition). */
+function GreenViewModal({ hole, fromLat, fromLon, distanceUnit, onClose }) {
+  const hasPolygon = hole.greenPolygon?.length > 2;
+  const greenLat = hole.greenLat, greenLon = hole.greenLon;
+  const unitLabel = distanceUnit === "m" ? "m" : "yd";
+  const bounds = hasPolygon ? L.latLngBounds(hole.greenPolygon.map((p) => [p.lat, p.lon])) : null;
+  const centerLat = hasPolygon ? bounds.getCenter().lat : greenLat;
+  const centerLon = hasPolygon ? bounds.getCenter().lng : greenLon;
+  const bearing = bearingDeg(fromLat, fromLon, centerLat, centerLon);
+  const cssRotateDeg = bearing != null ? -bearing : 0;
+  const distanceToGreen = fromLat != null && centerLat != null ? haversineYards(fromLat, fromLon, centerLat, centerLon) : null;
+
+  if (greenLat == null && !hasPolygon) {
+    return (
+      <div style={{ position: "fixed", inset: 0, background: "rgba(20,20,16,0.55)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 14 }} onClick={onClose}>
+        <div style={{ background: C.paper, borderRadius: 10, padding: 16, maxWidth: 340 }} onClick={(e) => e.stopPropagation()}>
+          <div style={{ fontFamily: serif, fontSize: 16, color: C.fairway, marginBottom: 8 }}>Green view unavailable</div>
+          <div style={{ fontFamily: sans, fontSize: 13, color: C.turf, marginBottom: 14 }}>This hole doesn't have any green location data yet — add it via a course search/refresh, or mark it manually in Courses.</div>
+          <button style={btnPrimary} onClick={onClose}>Close</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(20,20,16,0.55)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 14 }}>
+      <div style={{ background: C.paper, borderRadius: 10, padding: 16, width: "100%", maxWidth: 480, maxHeight: "92vh", overflow: "auto" }}>
+        <div style={{ fontFamily: serif, fontSize: 16, color: C.fairway, marginBottom: 4 }}>Hole {hole.number} — green view</div>
+        <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, marginBottom: 10 }}>
+          {bearing != null
+            ? "Rotated to your current line of attack — the direction straight up is the direction you're facing the green from."
+            : "No position to line up from yet — showing the green north-up."}
+          {!hasPolygon && " No mapped green outline for this hole — showing a fixed close-up instead."}
+        </div>
+        <div style={{ height: 320, borderRadius: 6, overflow: "hidden", border: `1px solid ${C.line}`, position: "relative" }}>
+          {bearing != null && (
+            <div style={{ position: "absolute", top: 6, left: "50%", transform: "translateX(-50%)", zIndex: 500, fontSize: 18, color: C.white, textShadow: "0 1px 3px rgba(0,0,0,0.6)", pointerEvents: "none" }}>⬆</div>
+          )}
+          <div style={{ height: "100%", width: "100%", transform: cssRotateDeg ? `rotate(${cssRotateDeg}deg)` : undefined }}>
+            {hasPolygon ? (
+              <MapContainer bounds={bounds} boundsOptions={{ padding: [24, 24] }} style={{ height: "100%", width: "100%" }}>
+                <TileLayer
+                  url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                  attribution="Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community"
+                />
+                <Polygon positions={hole.greenPolygon.map((p) => [p.lat, p.lon])} pathOptions={{ color: C.white, weight: 2, fillColor: C.turf, fillOpacity: 0.35 }} />
+                {greenLat != null && <Marker position={[greenLat, greenLon]} icon={greenIcon} />}
+                <RotationDragLock rotateDeg={cssRotateDeg} />
+              </MapContainer>
+            ) : (
+              <MapContainer center={[greenLat, greenLon]} zoom={19} style={{ height: "100%", width: "100%" }}>
+                <TileLayer
+                  url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                  attribution="Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community"
+                />
+                <Marker position={[greenLat, greenLon]} icon={greenIcon} />
+                <RotationDragLock rotateDeg={cssRotateDeg} />
+              </MapContainer>
+            )}
+          </div>
+        </div>
+        {distanceToGreen != null && (
+          <div style={{ fontFamily: mono, fontSize: 14, color: C.ink, margin: "10px 0" }}>
+            Distance to green centre: <b>{Math.round(displayDistance(distanceToGreen, distanceUnit))} {unitLabel}</b>
+          </div>
+        )}
+        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          <button style={btnPrimary} onClick={onClose}>Close</button>
         </div>
       </div>
     </div>
@@ -3122,6 +3217,7 @@ function BetterBallFocusedHole({
   hole, isLast, solo, pA1, pB1, pA2, pB2, team1Ids, team2Ids, bbState, distanceUnit, livePos,
   mePlayerId, mePlayer, course, teeAssign, greenTarget = "back", onSetGreenTarget, onUpdateTeam1, onUpdateTeam2, onMarkDrive1, onMarkShot1, onMarkDrive2, onMarkShot2, onNext,
 }) {
+  const [showGreenView, setShowGreenView] = useState(false);
   const aimGreen = livePos ? greenAimPoint(livePos.lat, livePos.lon, hole, greenTarget) : null;
   const liveYards = aimGreen && livePos ? haversineYards(livePos.lat, livePos.lon, aimGreen.lat, aimGreen.lon) : null;
   const unitLabel = distanceUnit === "m" ? "m" : "y";
@@ -3146,8 +3242,21 @@ function BetterBallFocusedHole({
               <div style={{ color: C.fairway, fontWeight: 700 }}>📍 {Math.round(displayDistance(liveYards, distanceUnit))}{unitLabel}</div>
             </div>
           )}
+          {hole.greenLat != null && (
+            <button style={{ ...btnGhost, fontSize: 10.5, padding: "3px 8px", marginTop: 4 }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
+          )}
         </div>
       </div>
+
+      {showGreenView && (
+        <GreenViewModal
+          hole={hole}
+          fromLat={livePos?.lat ?? hole.teeLat}
+          fromLon={livePos?.lon ?? hole.teeLon}
+          distanceUnit={distanceUnit}
+          onClose={() => setShowGreenView(false)}
+        />
+      )}
 
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
         <BetterBallHoleCard hole={hole} teamKey="team1" teamColor={C.team1} teamLabel={solo ? "Better Ball" : "Team 1"} playerAName={pA1?.name || "A"} playerBName={pB1?.name || "B"}
@@ -3179,6 +3288,7 @@ function BetterBallFocusedHole({
 function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit, livePos, mePlayer, course, teeAssign, greenTarget = "back", onSetGreenTarget, onScoreField, onMarkDrive, onMarkNextShot, onNext }) {
   const [puttPickerForPid, setPuttPickerForPid] = useState(null); // 15 Aug — same tap-only picker as Better Ball, applied here too
   const [penaltyTarget, setPenaltyTarget] = useState(null); // null | { pid, kind: "drive" } | { pid, kind: "extra", idx }
+  const [showGreenView, setShowGreenView] = useState(false);
   const aimGreen = livePos ? greenAimPoint(livePos.lat, livePos.lon, hole, greenTarget) : null;
   const liveYards = aimGreen && livePos ? haversineYards(livePos.lat, livePos.lon, aimGreen.lat, aimGreen.lon) : null;
   /* Driver only makes sense as a tee-shot suggestion (16 Aug) — once mePlayer's own drive is
@@ -3243,8 +3353,21 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
             </div>
           )}
           {suggestion && <div style={{ color: C.fairway }}>🎒 {suggestion}</div>}
+          {hole.greenLat != null && (
+            <button style={{ ...btnGhost, fontSize: 10.5, padding: "3px 8px", marginTop: 4 }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
+          )}
         </div>
       </div>
+
+      {showGreenView && (
+        <GreenViewModal
+          hole={hole}
+          fromLat={livePos?.lat ?? hole.teeLat}
+          fromLon={livePos?.lon ?? hole.teeLon}
+          distanceUnit={distanceUnit}
+          onClose={() => setShowGreenView(false)}
+        />
+      )}
 
       <div style={{ display: "grid", gap: 8 }}>
         {selected.map((pid) => {
