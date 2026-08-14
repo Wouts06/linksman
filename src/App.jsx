@@ -823,12 +823,37 @@ function buildOSMTeeSets(holes, teeBoxes) {
         : baseHole?.greenLat != null
           ? Math.round(haversineMeters(pt.lat, pt.lon, baseHole.greenLat, baseHole.greenLon) / 0.9144)
           : null;
-      holesObj[num] = { yardage, teeLat: pt.lat, teeLon: pt.lon };
+
+      // SANITY CHECK, added 13 Aug after the user reported real, wrong-looking data at a course
+      // he personally mapped (Mowbray) — red tees showing up LONGER than blue tees, which
+      // shouldn't happen (tee colors have a real, known distance hierarchy). Root cause: since
+      // real golf=tee elements essentially never carry a hole number (see nearestHoleNumber
+      // above), a tee marker can get matched to the wrong nearby hole when two holes route close
+      // together — producing a distance that's technically "computed correctly" for the wrong
+      // hole. Cross-checking against that hole's OWN already-trusted yardage (from its
+      // golf=hole way, unrelated to any tee-marker matching) catches exactly this: a genuinely
+      // mismatched point produces a wildly different distance than the hole's real length, so
+      // it's dropped here rather than shown as a plausible-looking wrong number.
+      const baseYardageMeters = baseHole?.yardageMeters;
+      const rawMeters = pt.distMeters != null ? pt.distMeters : (yardage != null ? yardage * 0.9144 : null);
+      const isPlausible = baseYardageMeters == null || rawMeters == null
+        ? true
+        : Math.abs(rawMeters - baseYardageMeters) <= Math.max(130, baseYardageMeters * 0.45);
+      if (yardage != null && isPlausible) {
+        holesObj[num] = { yardage, teeLat: pt.lat, teeLon: pt.lon };
+      }
     }
-    sets.push({ colorKey, name: info.name, color: info.color, holeCount: ptsByHole.size, holes: holesObj });
+    sets.push({ colorKey, name: info.name, color: info.color, holeCount: Object.keys(holesObj).length, holes: holesObj });
   }
-  sets.sort((a, b) => b.holeCount - a.holeCount || a.name.localeCompare(b.name));
-  return sets;
+
+  // COVERAGE FILTER, added 13 Aug at the user's explicit request ("if a color does not have 18
+  // values found then ignore the color entirely") — a color that, after the sanity check above,
+  // doesn't cover every hole this course actually has data for is more likely a partial/garbled
+  // detection than a real, intentionally-partial tee set, and showing it was exactly what read
+  // as "random color tees... don't really line up." Dropped entirely rather than shown partial.
+  const fullCoverage = sets.filter((s) => s.holeCount === holes.length);
+  fullCoverage.sort((a, b) => b.holeCount - a.holeCount || a.name.localeCompare(b.name));
+  return fullCoverage;
 }
 
 /* throws (rather than silently returning []) when the lookup fails, so the caller can
@@ -1153,6 +1178,108 @@ function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, d
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button style={btnGhost} onClick={onCancel}>Cancel</button>
           <button style={btnPrimary} disabled={!pos} onClick={() => onSave(shotYards != null ? Math.round(shotYards) : null, pos.lat, pos.lng, remainYards)}>Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* picks readable text color (near-black or white) for a given hex background — used by
+   TeePickerModal to keep each tee's color row legible regardless of how light/dark that tee's
+   own color is (e.g. white/yellow rows need dark text, black/blue/red/green rows need light
+   text). Standard relative-luminance approximation, not full WCAG contrast math — plenty
+   accurate for a handful of fixed preset colors. */
+function readableTextOn(hex) {
+  const clean = (hex || "#8A8A8A").replace("#", "");
+  const r = parseInt(clean.substring(0, 2), 16) || 0;
+  const g = parseInt(clean.substring(2, 4), 16) || 0;
+  const b = parseInt(clean.substring(4, 6), 16) || 0;
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return luminance > 0.6 ? "#1A1A1A" : "#FFFFFF";
+}
+
+/* Per-player tee-selection screen at round setup — added 13 Aug after the user shared a
+   reference screenshot from another golf app and asked for something in that spirit (not a
+   pixel copy): a full colored list of the course's tees with rating/slope shown, replacing the
+   small inline dropdown that shipped with the original tee-box feature. Also folds in a live
+   playing-handicap preview (Hcp → Allowance → Playing Hcp), which the user specifically asked
+   for and which the app can already compute (courseHandicap() already existed, used at round
+   finish — this just surfaces it earlier, at selection time, using whichever tee is currently
+   highlighted here rather than waiting until the round is scored).
+   Selecting a row updates `pending` immediately (so the preview below reacts live, matching the
+   reference screenshot's checkmark-follows-selection feel) but nothing is actually committed to
+   the round until ✓ is tapped — ✕ (or backdrop tap) discards `pending` and closes without
+   changing the player's existing tee assignment. */
+function TeePickerModal({ player, course, currentTeeId, onConfirm, onCancel }) {
+  const tees = getCourseTees(course);
+  const [pending, setPending] = useState(currentTeeId);
+  const [allowance, setAllowance] = useState("100");
+  const selectedTee = tees.find((t) => t.id === pending) || tees[0];
+  const hi = player ? computeHandicapIndex((player.differentials || []).map((d) => d.value)) : null;
+  const par = course ? parTotal(course) : 0;
+  const ch = courseHandicap(hi, selectedTee?.slope, selectedTee?.rating, par);
+  // an empty field (user cleared it while typing) defaults to 100%, not 0 — Number("") is 0,
+  // which would otherwise flash "Playing Hcp: 0" mid-edit rather than just holding steady
+  const allowancePct = allowance.trim() === "" ? 100 : Number(allowance);
+  const playingHcp = !isNaN(allowancePct) ? Math.round(ch * (allowancePct / 100)) : ch;
+
+  return (
+    <div
+      onClick={onCancel}
+      style={{ position: "fixed", inset: 0, background: "rgba(20,20,16,0.55)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 14 }}
+    >
+      <div onClick={(e) => e.stopPropagation()} style={{ background: C.paper, borderRadius: 10, width: "100%", maxWidth: 420, maxHeight: "92vh", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+        <div style={{ background: C.fairway, color: C.white, padding: "14px 16px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <button onClick={onCancel} style={{ background: "transparent", border: "none", color: C.white, fontSize: 20, cursor: "pointer", padding: 4, lineHeight: 1 }} aria-label="Cancel">✕</button>
+          <div style={{ fontFamily: sans, fontSize: 16, fontWeight: 700 }}>{player?.name || "Player"}</div>
+          <button onClick={() => onConfirm(pending)} style={{ background: "transparent", border: "none", color: C.white, fontSize: 20, cursor: "pointer", padding: 4, lineHeight: 1 }} aria-label="Confirm">✓</button>
+        </div>
+        <div style={{ overflow: "auto", flex: 1 }}>
+          <div style={{ fontFamily: sans, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: C.turf, padding: "12px 16px 4px" }}>Tee</div>
+          {tees.map((t) => {
+            const textColor = readableTextOn(t.color);
+            const isSelected = t.id === pending;
+            return (
+              <button
+                key={t.id}
+                onClick={() => setPending(t.id)}
+                style={{
+                  width: "100%", boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "space-between",
+                  background: t.color, color: textColor, border: "none", borderBottom: `1px solid ${C.line}`,
+                  padding: "14px 16px", cursor: "pointer", fontFamily: sans, textAlign: "left",
+                }}
+              >
+                <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ width: 16, display: "inline-block", fontWeight: 900 }}>{isSelected ? "✓" : ""}</span>
+                  <span style={{ fontSize: 15, fontWeight: 700 }}>{t.name}</span>
+                </span>
+                <span style={{ fontSize: 13, fontFamily: mono }}>
+                  {t.rating != null && t.slope != null ? `${Number(t.rating).toFixed(1)}/${t.slope}` : "—"}
+                </span>
+              </button>
+            );
+          })}
+          <div style={{ padding: "14px 16px", display: "flex", alignItems: "center", gap: 10, borderTop: `1px solid ${C.line}`, marginTop: 4 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, marginBottom: 4 }}>Hcp</div>
+              <div style={{ ...inputStyle, textAlign: "center", fontFamily: mono, fontWeight: 700 }}>{hi != null ? hi.toFixed(1) : "—"}</div>
+            </div>
+            <div style={{ fontSize: 16, color: C.turf, marginTop: 16 }}>→</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, marginBottom: 4 }}>Allowance</div>
+              <input
+                style={{ ...inputStyle, textAlign: "center", fontFamily: mono }}
+                value={allowance}
+                onChange={(e) => setAllowance(e.target.value.replace(/[^0-9]/g, ""))}
+                inputMode="numeric"
+              />
+            </div>
+            <div style={{ fontSize: 16, color: C.turf, marginTop: 16 }}>→</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, marginBottom: 4 }}>Playing Hcp</div>
+              <div style={{ ...inputStyle, textAlign: "center", fontFamily: mono, fontWeight: 700, borderColor: C.fairway }}>{playingHcp}</div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -1958,7 +2085,32 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
               <span style={{ fontFamily: sans, fontSize: 12, color: C.turf }}>tees</span>
             </div>
 
-            {extraTees.map((t, i) => (
+            {/* OSM-detected tees (t.fromOSM) render as a compact single-line row rather than a
+                full per-hole yardage grid — added 13 Aug at the user's request, after the
+                original stacked-block layout (every extra tee showing its own editable 18-value
+                grid, even auto-detected ones) read as confusing ("the following blocks for the
+                colors seem to decide random color tees"). Auto-detected data is now sanity-
+                checked and only ever stored when it covers every hole (see buildOSMTeeSets), so
+                it no longer needs a value-by-value review here — trust it, show it compactly,
+                and let the course be edited afterward if a specific number still looks wrong.
+                Manually-added tees (no fromOSM flag) keep the full editable grid below, since
+                that's the only way to actually enter their numbers. */}
+            {extraTees.map((t, i) => t.fromOSM ? (
+              <div key={t.id} style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 6, padding: "8px 10px", marginBottom: 8, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <span style={{ width: 10, height: 10, borderRadius: "50%", display: "inline-block", background: t.color, border: `1px solid ${C.line}`, flexShrink: 0 }} />
+                <span style={{ fontFamily: sans, fontSize: 13, fontWeight: 600, color: C.ink }}>{t.name}</span>
+                {/* the actual number of holes this tee has real OSM data for — NOT `holes.length`
+                    (the display table is padded to 9/18 rows even when OSM only mapped fewer),
+                    so this never overstates coverage on a partially-mapped course */}
+                <span title="Detected from colour-tagged tee markers on OpenStreetMap — includes real GPS; buildOSMTeeSets only ever keeps a color once it covers every hole OSM had data for"
+                  style={{ fontFamily: sans, fontSize: 10, color: C.fairway, border: `1px solid ${C.fairway}`, borderRadius: 4, padding: "2px 5px" }}>
+                  📍 OSM · {Object.values(t.yardages || {}).filter(Boolean).length} holes
+                </span>
+                <input style={{ ...inputStyle, width: 76, marginLeft: "auto" }} placeholder="Rating" value={t.rating} onChange={(e) => updateExtraTee(i, "rating", e.target.value)} />
+                <input style={{ ...inputStyle, width: 66 }} placeholder="Slope" value={t.slope} onChange={(e) => updateExtraTee(i, "slope", e.target.value)} />
+                <button style={btnDanger} onClick={() => removeExtraTee(i)}>Remove</button>
+              </div>
+            ) : (
               <div key={t.id} style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 6, padding: 10, marginBottom: 8 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
                   <span style={{ width: 10, height: 10, borderRadius: "50%", display: "inline-block", background: t.color, border: `1px solid ${C.line}`, flexShrink: 0 }} />
@@ -1966,19 +2118,12 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
                     {TEE_PRESETS.some((p) => p.name === t.name) ? null : <option value={t.name}>{t.name}</option>}
                     {TEE_PRESETS.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
                   </select>
-                  {t.fromOSM && (
-                    <span title="Detected from a colour-tagged tee marker on OpenStreetMap — includes real GPS for this tee"
-                      style={{ fontFamily: sans, fontSize: 10, color: C.fairway, border: `1px solid ${C.fairway}`, borderRadius: 4, padding: "2px 5px" }}>
-                      📍 OSM
-                    </span>
-                  )}
                   <input style={{ ...inputStyle, width: 80 }} placeholder="Rating" value={t.rating} onChange={(e) => updateExtraTee(i, "rating", e.target.value)} />
                   <input style={{ ...inputStyle, width: 70 }} placeholder="Slope" value={t.slope} onChange={(e) => updateExtraTee(i, "slope", e.target.value)} />
                   <button style={{ ...btnDanger, marginLeft: "auto" }} onClick={() => removeExtraTee(i)}>Remove</button>
                 </div>
                 <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, marginBottom: 6 }}>
                   Distance per hole ({distanceUnit === "m" ? "m" : "yd"}) — par and stroke index come from the table above
-                  {t.fromOSM ? "; yardages pre-filled from OpenStreetMap, editable if needed" : ""}
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(58px, 1fr))", gap: 6 }}>
                   {holes.map((h) => (
@@ -2663,6 +2808,9 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
      back to tees[0] anyway via teeIdFor() — resetting avoids carrying a same-shaped-but-wrong id
      across courses. */
   const [teeAssign, setTeeAssign] = useState(savedRound?.teeAssign || {});
+  /* which player's tee-picker modal (see TeePickerModal) is currently open at round setup —
+     a player id, or null when closed. Not persisted (setup-screen-only, transient UI state). */
+  const [teePickerFor, setTeePickerFor] = useState(null);
   const [bbState, setBbState] = useState(savedRound?.bbState || { team1: {}, team2: {} });
   const [startHole, setStartHole] = useState(savedRound?.startHole || 1);
   const [activeIdx, setActiveIdx] = useState(savedRound?.activeIdx ?? 0);
@@ -3233,17 +3381,18 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
                   </div>
                 </div>
                 {on && courseTees.length > 1 && (
-                  <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
-                    <span style={{ fontFamily: sans, fontSize: 11, color: C.turf }}>Tees:</span>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setTeePickerFor(p.id); }}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 6, marginTop: 8, alignSelf: "flex-start",
+                      background: "transparent", border: `1px solid ${C.line}`, borderRadius: 5,
+                      padding: "5px 9px", cursor: "pointer", fontFamily: sans,
+                    }}
+                  >
                     <span style={{ width: 9, height: 9, borderRadius: "50%", display: "inline-block", background: courseTees.find((t) => t.id === playerTeeId)?.color || C.turf, border: `1px solid ${C.line}`, flexShrink: 0 }} />
-                    <select
-                      style={{ ...inputStyle, padding: "4px 6px", fontSize: 12, width: "auto" }}
-                      value={playerTeeId}
-                      onChange={(e) => setPlayerTee(p.id, e.target.value)}
-                    >
-                      {courseTees.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-                    </select>
-                  </div>
+                    <span style={{ fontSize: 12, color: C.ink, fontWeight: 600 }}>{courseTees.find((t) => t.id === playerTeeId)?.name || "Tee"}</span>
+                    <span style={{ fontSize: 10, color: C.turf }}>▸</span>
+                  </button>
                 )}
               </div>
             );
@@ -3259,6 +3408,15 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
           <div style={{ fontFamily: sans, fontSize: 12, color: C.flag, marginBottom: 10 }}>Select at least one player above to start.</div>
         )}
         <button style={btnPrimary} disabled={selected.length === 0 || !teamsReady} onClick={beginRound}>Start round →</button>
+        {teePickerFor && (
+          <TeePickerModal
+            player={players.find((p) => p.id === teePickerFor)}
+            course={course}
+            currentTeeId={teeAssign[teePickerFor] || getCourseTees(course)[0]?.id}
+            onConfirm={(teeId) => { setPlayerTee(teePickerFor, teeId); setTeePickerFor(null); }}
+            onCancel={() => setTeePickerFor(null)}
+          />
+        )}
       </div>
     );
   }
