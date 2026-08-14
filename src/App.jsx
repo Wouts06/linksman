@@ -287,17 +287,51 @@ function nearestHoleByPosition(holes, pos) {
   return best;
 }
 
-/* closest-carry-distance club in a player's bag to the yardage remaining */
-function suggestClub(bag, remainingYards) {
+/* closest-carry-distance club in a player's bag to the yardage remaining. Returns
+   { primary, alt } (or null if no suggestion is possible) rather than a bare club name — see
+   the "gap" logic below for why. Pass formatClubSuggestion() to turn the result into display
+   text.
+
+   opts.excludeDriver drops the Driver from consideration entirely (16 Aug, per user request:
+   "For the second shot on a hole the Driver club should not be considered as an option for the
+   suggested club for the next shot" — the driver only makes sense as a tee-shot club, so every
+   call site suggesting a club for anything after the tee shot passes this).
+
+   Gap logic (same request, same round): if the single closest-distance club actually carries
+   5-7 meters (~5.5-7.7 yards) FARTHER than the remaining distance — a genuine in-between-clubs
+   situation, not just ordinary rounding — this returns both that club ("toned down", i.e. less
+   than a full swing) and the next-shorter club in the bag ("full", i.e. a complete swing) as
+   two options, rather than silently picking one. Outside that narrow gap, or when there's no
+   shorter club in the bag to offer as the alternative, `alt` is null and normal single-club
+   behavior applies. */
+function suggestClub(bag, remainingYards, opts = {}) {
   if (!bag || !bag.length || remainingYards == null) return null;
-  const candidates = bag.filter((c) => c.club !== "Putter" && c.distanceYards);
+  let candidates = bag.filter((c) => c.club !== "Putter" && c.distanceYards);
+  if (opts.excludeDriver) candidates = candidates.filter((c) => c.club !== "Driver");
   if (!candidates.length) return null;
   let best = null, bestDiff = Infinity;
   candidates.forEach((c) => {
     const diff = Math.abs(c.distanceYards - remainingYards);
     if (diff < bestDiff) { bestDiff = diff; best = c; }
   });
-  return best ? best.club : null;
+  if (!best) return null;
+  const overshoot = best.distanceYards - remainingYards;
+  const GAP_MIN_YD = 5 / 0.9144, GAP_MAX_YD = 7 / 0.9144; // 5-7 meters, converted to yards
+  if (overshoot >= GAP_MIN_YD && overshoot <= GAP_MAX_YD) {
+    const shorter = candidates
+      .filter((c) => c.distanceYards < best.distanceYards)
+      .sort((a, b) => b.distanceYards - a.distanceYards)[0]; // the next-longest of the shorter clubs
+    if (shorter) return { primary: best.club, alt: shorter.club };
+  }
+  return { primary: best.club, alt: null };
+}
+/* turns a suggestClub() result into display/spoken text — a single club name normally, or
+   "Toned down X or Full Y" when the gap logic above found a genuine in-between-clubs situation.
+   abbreviate uses CLUB_ABBREV (e.g. "7i") for compact UI slots; full names otherwise. */
+function formatClubSuggestion(sugg, { abbreviate } = {}) {
+  if (!sugg) return null;
+  const name = (c) => (abbreviate ? CLUB_ABBREV[c] || c : c);
+  return sugg.alt ? `Toned down ${name(sugg.primary)} or Full ${name(sugg.alt)}` : name(sugg.primary);
 }
 
 /* always-listening "Hey Gaddy" voice caddy — wake word + a club name or "record shot" command,
@@ -2727,7 +2761,11 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
   const [penaltyTarget, setPenaltyTarget] = useState(null); // null | { roundIdx, who: "A"|"B"|null }
   const aimGreen = livePos ? greenAimPoint(livePos.lat, livePos.lon, hole, greenTarget) : null;
   const remainingYards = aimGreen && livePos ? haversineYards(livePos.lat, livePos.lon, aimGreen.lat, aimGreen.lon) : null;
-  const suggestion = meBag?.length > 0 ? suggestClub(meBag, remainingYards) : null;
+  /* two variants (16 Aug): the tee-shot drive slots (round 0) may suggest the Driver, everything
+     after (round > 0, approach shots) may not — see suggestClub's opts.excludeDriver. */
+  const suggestionForDrive = meBag?.length > 0 ? formatClubSuggestion(suggestClub(meBag, remainingYards)) : null;
+  const suggestionForApproach = meBag?.length > 0 ? formatClubSuggestion(suggestClub(meBag, remainingYards, { excludeDriver: true })) : null;
+  const topSuggestion = s.rounds.length === 1 ? suggestionForDrive : suggestionForApproach;
   const unitLabel = distanceUnit === "m" ? "m" : "y";
   const courseTees = course ? getCourseTees(course) : [];
   const defaultTeeId = courseTees[0]?.id;
@@ -2786,7 +2824,7 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
       {remainingYards != null && (
         <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, marginBottom: 6 }}>
           📍 {Math.round(displayDistance(remainingYards, distanceUnit))}{distanceUnit === "m" ? "m" : "y"} to green (live)
-          {suggestion && <span style={{ color: C.fairway, fontWeight: 700, marginLeft: 6 }}>🎒 {suggestion}</span>}
+          {topSuggestion && <span style={{ color: C.fairway, fontWeight: 700, marginLeft: 6 }}>🎒 {topSuggestion}</span>}
         </div>
       )}
 
@@ -2819,8 +2857,8 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
                         <option value="">Club —</option>
                         {CLUBS.map((c) => <option key={c} value={c}>{c}</option>)}
                       </select>
-                      {playerAId === mePlayerId && suggestion && !r.clubA && (
-                        <div style={{ fontSize: 10, color: C.fairway, fontWeight: 700, marginTop: 2 }}>🎒 {suggestion}?</div>
+                      {playerAId === mePlayerId && suggestionForDrive && !r.clubA && (
+                        <div style={{ fontSize: 10, color: C.fairway, fontWeight: 700, marginTop: 2 }}>🎒 {suggestionForDrive}?</div>
                       )}
                       <div style={{ marginTop: 4 }}>
                         <PenaltyBadgeButton value={r.penaltyA} onClick={() => setPenaltyTarget({ roundIdx: i, who: "A" })} />
@@ -2846,8 +2884,8 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
                         <option value="">Club —</option>
                         {CLUBS.map((c) => <option key={c} value={c}>{c}</option>)}
                       </select>
-                      {playerBId === mePlayerId && suggestion && !r.clubB && (
-                        <div style={{ fontSize: 10, color: C.fairway, fontWeight: 700, marginTop: 2 }}>🎒 {suggestion}?</div>
+                      {playerBId === mePlayerId && suggestionForDrive && !r.clubB && (
+                        <div style={{ fontSize: 10, color: C.fairway, fontWeight: 700, marginTop: 2 }}>🎒 {suggestionForDrive}?</div>
                       )}
                       <div style={{ marginTop: 4 }}>
                         <PenaltyBadgeButton value={r.penaltyB} onClick={() => setPenaltyTarget({ roundIdx: i, who: "B" })} />
@@ -2872,8 +2910,8 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
                         <option value="">Club —</option>
                         {CLUBS.map((c) => <option key={c} value={c}>{c}</option>)}
                       </select>
-                      {hitId === mePlayerId && suggestion && !r.club && (
-                        <span style={{ fontSize: 10, color: C.fairway, fontWeight: 700 }}>🎒 {suggestion}?</span>
+                      {hitId === mePlayerId && suggestionForApproach && !r.club && (
+                        <span style={{ fontSize: 10, color: C.fairway, fontWeight: 700 }}>🎒 {suggestionForApproach}?</span>
                       )}
                       <PenaltyBadgeButton value={r.penalty} onClick={() => setPenaltyTarget({ roundIdx: i, who: null })} />
                     </div>
@@ -3056,7 +3094,14 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
   const [penaltyTarget, setPenaltyTarget] = useState(null); // null | { pid, kind: "drive" } | { pid, kind: "extra", idx }
   const aimGreen = livePos ? greenAimPoint(livePos.lat, livePos.lon, hole, greenTarget) : null;
   const liveYards = aimGreen && livePos ? haversineYards(livePos.lat, livePos.lon, aimGreen.lat, aimGreen.lon) : null;
-  const suggestion = liveYards != null && mePlayer?.bag?.length ? suggestClub(mePlayer.bag, liveYards) : null;
+  /* Driver only makes sense as a tee-shot suggestion (16 Aug) — once mePlayer's own drive is
+     already marked (or they've already got an extra/approach shot logged) for this hole, this
+     header suggestion is for shot 2+, so Driver is dropped from consideration. */
+  const meCell = mePlayer ? scores[mePlayer.id]?.[hole.number] : null;
+  const meIsTeeShot = !meCell || (meCell.driveYards == null && (meCell.extraShots || []).length === 0);
+  const suggestion = liveYards != null && mePlayer?.bag?.length
+    ? formatClubSuggestion(suggestClub(mePlayer.bag, liveYards, { excludeDriver: !meIsTeeShot }), { abbreviate: true })
+    : null;
   const unitLabel = distanceUnit === "m" ? "m" : "y";
   /* the header distance above reflects the course's first/default tee; when a player is
      assigned a different tee box (13 Aug tee-color feature) their own tee's yardage — which can
@@ -3107,7 +3152,7 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
               <div style={{ color: C.fairway, fontWeight: 700 }}>📍 {Math.round(displayDistance(liveYards, distanceUnit))}{unitLabel}</div>
             </div>
           )}
-          {suggestion && <div style={{ color: C.fairway }}>🎒 {CLUB_ABBREV[suggestion] || suggestion}</div>}
+          {suggestion && <div style={{ color: C.fairway }}>🎒 {suggestion}</div>}
         </div>
       </div>
 
@@ -3516,7 +3561,10 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
      button, and — for the voice/auto-detect paths, or when voice caddy is on — reads it aloud */
   function announceShotResult(result, { speakAloud } = {}) {
     if (!result) return;
-    const suggestion = mePlayer?.bag?.length ? suggestClub(mePlayer.bag, result.remaining) : null;
+    /* always excludes the Driver (16 Aug) -- this always suggests a club for the shot AFTER the
+       one that was just recorded (whether that was the drive itself or a later approach shot),
+       so the next shot is never the tee shot. */
+    const suggestion = mePlayer?.bag?.length ? formatClubSuggestion(suggestClub(mePlayer.bag, result.remaining, { excludeDriver: true })) : null;
     const yardsTxt = result.yards != null ? `${Math.round(displayDistance(result.yards, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : null;
     const remainTxt = result.remaining != null ? `${Math.round(displayDistance(result.remaining, distanceUnit))}${distanceUnit === "m" ? "m" : "y"} to the green` : null;
     const parts = [`${result.label} marked${yardsTxt ? ` (${yardsTxt})` : ""}`];
