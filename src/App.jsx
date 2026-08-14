@@ -3044,9 +3044,12 @@ function BetterBallFocusedHole({
   return (
     <div style={{ padding: 12, background: C.white }}>
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 10, gap: 8 }}>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 12, minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "stretch", gap: 12, minWidth: 0 }}>
           <div style={{ fontFamily: serif, fontSize: 36, color: C.fairway, lineHeight: 1 }}>{hole.number}</div>
-          <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, lineHeight: 1.5 }}>
+          {/* stretched to the same height as the hole number (16 Aug fix) — Par/SI used to sit on
+              its text baseline via alignItems: "baseline", which visually left them floating low
+              relative to the big number instead of evenly spanning its height */}
+          <div style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", fontFamily: sans, fontSize: 12, color: C.turf, lineHeight: 1.2 }}>
             <div>Par <b style={{ color: C.ink, fontSize: 14 }}>{hole.par}</b></div>
             {hole.strokeIndex ? <div>SI <b style={{ color: C.ink, fontSize: 14 }}>{hole.strokeIndex}</b></div> : null}
           </div>
@@ -3137,9 +3140,12 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
   return (
     <div style={{ padding: 12, background: C.white }}>
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 10, gap: 8 }}>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 12, minWidth: 0 }}>
+        <div style={{ display: "flex", alignItems: "stretch", gap: 12, minWidth: 0 }}>
           <div style={{ fontFamily: serif, fontSize: 36, color: C.fairway, lineHeight: 1 }}>{hole.number}</div>
-          <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, lineHeight: 1.5 }}>
+          {/* stretched to the same height as the hole number (16 Aug fix) — Par/SI used to sit on
+              its text baseline via alignItems: "baseline", which visually left them floating low
+              relative to the big number instead of evenly spanning its height */}
+          <div style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", fontFamily: sans, fontSize: 12, color: C.turf, lineHeight: 1.2 }}>
             <div>Par <b style={{ color: C.ink, fontSize: 14 }}>{hole.par}</b></div>
             {hole.strokeIndex ? <div>SI <b style={{ color: C.ink, fontSize: 14 }}>{hole.strokeIndex}</b></div> : null}
           </div>
