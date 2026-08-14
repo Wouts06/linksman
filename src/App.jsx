@@ -1179,6 +1179,8 @@ function computeShotStats(shotStats) {
     girPct: pct(par3, "green"),
     par3LeftPct: pct(par3, "left"),
     par3RightPct: pct(par3, "right"),
+    par3LongPct: pct(par3, "long"),
+    par3ShortPct: pct(par3, "short"),
   };
 }
 
@@ -1212,7 +1214,7 @@ function computeRoundStats(round, pid, courseHoles) {
     shapeCounts,
   };
 }
-const SHAPE_COLOR = { left: C.flag, right: C.brass, fairway: C.turf, green: C.turf };
+const SHAPE_COLOR = { left: C.flag, right: C.brass, fairway: C.turf, green: C.turf, long: C.team2, short: C.turfLight };
 
 function ScoreBadge({ gross, par }) {
   if (gross == null || gross === "")
@@ -1238,9 +1240,14 @@ function ScoreBadge({ gross, par }) {
 }
 
 function ShapeSelector({ par, value, onChange }) {
-  const opts = par === 3 ? [["left", "L"], ["green", "GR"], ["right", "R"]] : [["left", "L"], ["fairway", "F"], ["right", "R"]];
+  /* par-3 tees also get "long"/"short" (16 Aug, per user request) alongside left/green/right —
+     a par-3 miss isn't always sideways, it's very often just too much or too little club, and
+     that was previously nowhere to record. Par 4/5 drives are unchanged (left/fairway/right only). */
+  const opts = par === 3
+    ? [["left", "L"], ["green", "GR"], ["right", "R"], ["long", "O"], ["short", "S"]]
+    : [["left", "L"], ["fairway", "F"], ["right", "R"]];
   return (
-    <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
+    <div style={{ display: "flex", gap: 4, marginTop: 4, flexWrap: "wrap" }}>
       {opts.map(([v, label]) => (
         <button
           key={v}
@@ -2494,7 +2501,7 @@ function PlayersTab({ players, setPlayers, distanceUnit, mePlayerId, setMePlayer
                         <div>Par 4/5 drives ({stats.par45Count}): <b>{stats.fairwayPct}%</b> fairway · {stats.leftPct}% left · {stats.rightPct}% right</div>
                       )}
                       {stats.par3Count > 0 && (
-                        <div>Par 3 tee shots ({stats.par3Count}): <b>{stats.girPct}%</b> on the green · {stats.par3LeftPct}% left · {stats.par3RightPct}% right</div>
+                        <div>Par 3 tee shots ({stats.par3Count}): <b>{stats.girPct}%</b> on the green · {stats.par3LeftPct}% left · {stats.par3RightPct}% right · {stats.par3LongPct}% long · {stats.par3ShortPct}% short</div>
                       )}
                     </div>
                   )}
@@ -4586,7 +4593,7 @@ function BBTeamHistoryBlock({ team, ti, players, courseHoles, distanceUnit }) {
         </table>
       </div>
       <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, marginTop: 4 }}>
-        Chip color: <span style={{ color: C.turf, fontWeight: 700 }}>green = fairway/on green</span>, <span style={{ color: C.flag, fontWeight: 700 }}>red = left</span>, <span style={{ color: C.brass, fontWeight: 700 }}>amber = right</span> (based on that hole's drive)
+        Chip color: <span style={{ color: C.turf, fontWeight: 700 }}>green = fairway/on green</span>, <span style={{ color: C.flag, fontWeight: 700 }}>red = left</span>, <span style={{ color: C.brass, fontWeight: 700 }}>amber = right</span>, <span style={{ color: C.team2, fontWeight: 700 }}>brown = long (par 3)</span>, <span style={{ color: C.turfLight, fontWeight: 700 }}>light green = short (par 3)</span> (based on that hole's drive)
       </div>
       <div style={{ fontFamily: sans, fontSize: 12, color: C.ink, marginTop: 10, display: "grid", gap: 3, background: C.paper2, border: `1px solid ${C.line}`, borderRadius: 6, padding: "8px 10px" }}>
         <div style={{ fontSize: 10, fontFamily: sans, color: C.turf, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em", marginBottom: 1 }}>Ball usage &amp; shots</div>
