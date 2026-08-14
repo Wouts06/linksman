@@ -2590,8 +2590,41 @@ function bbHoleScore(state) {
   return pre + Math.min(a, b);
 }
 
+/* Putt-count entry as a tap-only popup (15 Aug) — replaces the old <input type="number"> which
+   popped the device keyboard just to enter a 1-2 digit number. Six same-size buttons: 1-5 plus a
+   "+" that swaps the grid to 6-10 (with a "‹ back" to return) for the rare longer putt. */
+const puttPickerBtnStyle = {
+  fontFamily: mono, fontSize: 20, fontWeight: 700, color: C.ink,
+  background: C.white, border: `1.5px solid ${C.line}`, borderRadius: 8,
+  aspectRatio: "1 / 1", width: "100%", cursor: "pointer", padding: 0,
+  display: "flex", alignItems: "center", justifyContent: "center",
+};
+function PuttPickerModal({ title, onSelect, onClose }) {
+  const [extended, setExtended] = useState(false);
+  const nums = extended ? [6, 7, 8, 9, 10] : [1, 2, 3, 4, 5];
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(20,20,16,0.55)", zIndex: 1100, display: "flex", alignItems: "center", justifyContent: "center", padding: 14 }} onClick={onClose}>
+      <div style={{ background: C.paper, borderRadius: 10, padding: 18, width: "100%", maxWidth: 300 }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ fontFamily: serif, fontSize: 16, color: C.fairway, marginBottom: 12, textAlign: "center" }}>{title}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
+          {nums.map((n) => (
+            <button key={n} style={puttPickerBtnStyle} onClick={() => onSelect(n)}>{n}</button>
+          ))}
+          {!extended ? (
+            <button style={puttPickerBtnStyle} onClick={() => setExtended(true)}>+</button>
+          ) : (
+            <button style={{ ...puttPickerBtnStyle, fontSize: 13 }} onClick={() => setExtended(false)}>‹ back</button>
+          )}
+        </div>
+        <button style={{ ...btnGhost, width: "100%", marginTop: 14, boxSizing: "border-box" }} onClick={onClose}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, playerBName, playerAId, playerBId, state, onUpdate, onMarkDrive, onMarkShot, livePos, distanceUnit, mePlayerId, meBag, course, teeAssign, greenTarget = "back" }) {
   const s = state || defaultBBHole();
+  const [puttPickerFor, setPuttPickerFor] = useState(null); // null | "A" | "B"
   const aimGreen = livePos ? greenAimPoint(livePos.lat, livePos.lon, hole, greenTarget) : null;
   const remainingYards = aimGreen && livePos ? haversineYards(livePos.lat, livePos.lon, aimGreen.lat, aimGreen.lon) : null;
   const suggestion = meBag?.length > 0 ? suggestClub(meBag, remainingYards) : null;
@@ -2631,6 +2664,15 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
      the team was now putting with — this is the fix. */
   const onGreenWho = lastRound?.continueWith || null;
   const onGreenName = onGreenWho === "A" ? playerAName : onGreenWho === "B" ? playerBName : null;
+  /* whose putt "scored the point" for the hole — now that both players' putt counts are always
+     collected (15 Aug), regardless of puttMode, this is a straight comparison of the two. Only
+     resolvable once both are actually entered. */
+  const puttNumA = s.ownPutts?.A !== "" && s.ownPutts?.A != null ? Number(s.ownPutts.A) : null;
+  const puttNumB = s.ownPutts?.B !== "" && s.ownPutts?.B != null ? Number(s.ownPutts.B) : null;
+  const pointWinner = puttNumA != null && puttNumB != null
+    ? (puttNumA < puttNumB ? "A" : puttNumB < puttNumA ? "B" : "tie")
+    : null;
+  const pointWinnerName = pointWinner === "A" ? playerAName : pointWinner === "B" ? playerBName : null;
 
   return (
     <div style={{ border: `1px solid ${C.line}`, borderRadius: 8, padding: "10px 12px", background: C.white, flex: 1, minWidth: 260, maxWidth: "100%", boxSizing: "border-box" }}>
@@ -2767,17 +2809,51 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
             <button onClick={() => patch({ puttMode: "better" })} style={{ ...btnGhost, fontSize: 13, padding: "8px 14px", background: s.puttMode === "better" ? teamColor : C.white, color: s.puttMode === "better" ? C.white : teamColor, borderColor: teamColor }}>Putt better ball</button>
             <button onClick={() => patch({ puttMode: "own" })} style={{ ...btnGhost, fontSize: 13, padding: "8px 14px", background: s.puttMode === "own" ? teamColor : C.white, color: s.puttMode === "own" ? C.white : teamColor, borderColor: teamColor }}>Play own ball</button>
           </div>
-          {s.puttMode === "better" && (
-            <input type="number" style={{ ...inputStyle, width: 90 }} placeholder="putts" value={s.betterPutts} onChange={(e) => patch({ betterPutts: e.target.value })} />
+          {s.puttMode && (
+            <>
+              {/* Both players' putts are always asked for now (15 Aug), regardless of mode —
+                  the mode still controls which count is used for the hole's official score
+                  (bbHoleScore: "better" uses the on-green player's count via betterPutts, "own"
+                  uses the lower of the two) but the other player's count is captured too so the
+                  round's putting stats ("More stats" below in History) are complete either way. */}
+              <div style={{ fontFamily: sans, fontSize: 10.5, color: C.turf, marginBottom: 6 }}>
+                Enter each player's putts — recorded for stats either way.
+              </div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                <button onClick={() => setPuttPickerFor("A")} style={{ ...btnGhost, fontSize: 12, padding: "8px 14px", textAlign: "left", lineHeight: 1.3 }}>
+                  {playerAName}<br /><b style={{ fontSize: 17, fontFamily: mono }}>{s.ownPutts.A || "—"}</b>
+                </button>
+                <button onClick={() => setPuttPickerFor("B")} style={{ ...btnGhost, fontSize: 12, padding: "8px 14px", textAlign: "left", lineHeight: 1.3 }}>
+                  {playerBName}<br /><b style={{ fontSize: 17, fontFamily: mono }}>{s.ownPutts.B || "—"}</b>
+                </button>
+              </div>
+              {pointWinner && (
+                <div style={{ fontFamily: sans, fontSize: 12, fontWeight: 700, color: pointWinner === "tie" ? C.brass : teamColor, marginBottom: 4 }}>
+                  {pointWinner === "tie" ? "🤝 Tie — both players putted the same" : `🏆 ${pointWinnerName}'s putt scored the point`}
+                </div>
+              )}
+            </>
           )}
-          {s.puttMode === "own" && (
-            <div style={{ display: "flex", gap: 14 }}>
-              <div>{playerAName} <input type="number" style={{ ...inputStyle, width: 70 }} value={s.ownPutts.A} onChange={(e) => patch({ ownPutts: { ...s.ownPutts, A: e.target.value } })} /></div>
-              <div>{playerBName} <input type="number" style={{ ...inputStyle, width: 70 }} value={s.ownPutts.B} onChange={(e) => patch({ ownPutts: { ...s.ownPutts, B: e.target.value } })} /></div>
-            </div>
-          )}
-          <button style={{ ...btnGhost, fontSize: 12, padding: "6px 12px", marginTop: 10 }} onClick={() => patch({ onGreen: false })}>← Back off the green</button>
+          <button style={{ ...btnGhost, fontSize: 12, padding: "6px 12px", marginTop: 6 }} onClick={() => patch({ onGreen: false })}>← Back off the green</button>
         </div>
+      )}
+      {puttPickerFor && (
+        <PuttPickerModal
+          title={`${puttPickerFor === "A" ? playerAName : playerBName} — putts on hole ${hole.number}`}
+          onSelect={(n) => {
+            const nextOwn = { ...s.ownPutts, [puttPickerFor]: String(n) };
+            const patchObj = { ownPutts: nextOwn };
+            // keep betterPutts (used by bbHoleScore/history for "better" mode) in sync with
+            // whichever player's ball actually reached the green, derived rather than typed
+            // separately now that we always collect both players' counts
+            if (s.puttMode === "better" && onGreenWho) {
+              patchObj.betterPutts = nextOwn[onGreenWho] || "";
+            }
+            patch(patchObj);
+            setPuttPickerFor(null);
+          }}
+          onClose={() => setPuttPickerFor(null)}
+        />
       )}
     </div>
   );
@@ -4058,6 +4134,43 @@ function bbPlayerUsageStats(holeDetails) {
   return stats;
 }
 
+/* Fairways/greens hit off the tee + putting distribution per player, for the "More stats" panel
+   (15 Aug). Fairways hit uses each hole's par (from courseHoles) to know whether "on target"
+   means the ShapeSelector's "fairway" value (par 4/5) or its "green" value (par 3) — same
+   target-shape logic as computeRoundStats uses for stroke play. Putting distribution buckets by
+   how many putts each player took (1/2/3/4+), read from ownPutts.A/B — now always collected
+   regardless of puttMode (see BetterBallHoleCard's on-green panel), though older rounds saved
+   before that change may only have ownPutts filled in for "own ball" holes. */
+function bbAdvancedStats(holeDetails, courseHoles) {
+  const stats = {
+    fairways: { A: { hit: 0, attempts: 0 }, B: { hit: 0, attempts: 0 } },
+    putts: { A: {}, B: {} },
+  };
+  Object.entries(holeDetails || {}).forEach(([hn, detail]) => {
+    const par = courseHoles?.find((h) => String(h.number) === String(hn))?.par;
+    const round0 = detail?.rounds?.[0];
+    if (round0 && par != null) {
+      const target = par === 3 ? "green" : "fairway";
+      ["A", "B"].forEach((who) => {
+        const shape = who === "A" ? round0.shapeA : round0.shapeB;
+        if (shape) {
+          stats.fairways[who].attempts += 1;
+          if (shape === target) stats.fairways[who].hit += 1;
+        }
+      });
+    }
+    ["A", "B"].forEach((who) => {
+      const raw = detail?.ownPutts?.[who];
+      const n = raw !== "" && raw != null ? Number(raw) : null;
+      if (n != null && !isNaN(n) && n > 0) {
+        const key = n >= 4 ? "4+" : String(n);
+        stats.putts[who][key] = (stats.putts[who][key] || 0) + 1;
+      }
+    });
+  });
+  return stats;
+}
+
 function RoundDetailStroke({ round, players, courseHoles, distanceUnit }) {
   return (
     <div style={{ display: "grid", gap: 16 }}>
@@ -4140,104 +4253,151 @@ function RoundDetailStroke({ round, players, courseHoles, distanceUnit }) {
   );
 }
 
-function RoundDetailBetterBall({ round, players, distanceUnit }) {
+/* One team's block in the Better Ball round detail — pulled out to its own component (15 Aug)
+   so the "More stats" panel below can hold its own open/closed state per team. */
+function BBTeamHistoryBlock({ team, ti, players, courseHoles, distanceUnit }) {
+  const [showMoreStats, setShowMoreStats] = useState(false);
+  const pA = players.find((p) => p.id === team.playerIds[0]);
+  const pB = players.find((p) => p.id === team.playerIds[1]);
+  const color = ti === 0 ? C.team1 : C.team2;
+  const nameA = pA?.name || "A", nameB = pB?.name || "B";
+  const usage = bbPlayerUsageStats(team.holeDetails);
+  const advanced = bbAdvancedStats(team.holeDetails, courseHoles);
+  const puttKeys = ["1", "2", "3", "4+"];
+  return (
+    <div>
+      <div style={{ fontFamily: serif, fontSize: 15, color, marginBottom: 6 }}>
+        {team.name} — {pA?.name} & {pB?.name} — Total <b>{team.total}</b>
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ borderCollapse: "collapse", tableLayout: "fixed", fontFamily: mono, fontSize: 12, width: "100%" }}>
+          <colgroup>
+            <col style={{ width: "12%" }} />
+            <col style={{ width: "42%" }} />
+            <col style={{ width: "28%" }} />
+            <col style={{ width: "18%" }} />
+          </colgroup>
+          <thead><tr><th style={bbThStyle}>Hole</th><th style={bbThStyle}>Shots played from</th><th style={bbThStyle}>Putts</th><th style={bbThStyle}>Score</th></tr></thead>
+          <tbody>
+            {Object.keys(team.holeScores).map((hn) => {
+              const detail = team.holeDetails?.[hn];
+              const putts = detail?.puttMode === "better" ? detail.betterPutts
+                : detail?.puttMode === "own" ? Math.min(Number(detail.ownPutts?.A) || 99, Number(detail.ownPutts?.B) || 99)
+                : null;
+              /* whose ball actually reached the green this hole — the last recorded shot
+                 round's own continueWith (see BetterBallHoleCard's identical on-green
+                 banner, 14 Aug) — surfaced here too since the user reported it "nowhere...
+                 indicates" this in the history, only in scoring. Only meaningful once the
+                 hole was actually finished through the on-green flow (puttMode set). */
+              const lastRnd = detail?.rounds?.[detail.rounds.length - 1];
+              const onGreenWho = detail?.puttMode && lastRnd ? lastRnd.continueWith : null;
+              const onGreenName = onGreenWho === "A" ? pA?.name : onGreenWho === "B" ? pB?.name : null;
+              /* who "scored the point" for the hole — a straight comparison of both players'
+                 putt counts, now that both are always collected regardless of puttMode (15 Aug
+                 follow-up request). Only shown once both counts are actually present — older
+                 rounds saved before that change may only have one side filled in. */
+              const puttNumA = detail?.ownPutts?.A !== "" && detail?.ownPutts?.A != null ? Number(detail.ownPutts.A) : null;
+              const puttNumB = detail?.ownPutts?.B !== "" && detail?.ownPutts?.B != null ? Number(detail.ownPutts.B) : null;
+              const pointWinnerLabel = puttNumA != null && puttNumB != null
+                ? (puttNumA < puttNumB ? nameA : puttNumB < puttNumA ? nameB : "Tie")
+                : null;
+              return (
+                <tr key={hn}>
+                  <td style={bbTdStyle}>{hn}</td>
+                  <td style={{ ...bbTdStyle, display: "flex", flexWrap: "wrap", gap: 2 }}>
+                    {detail?.rounds?.map((rnd, ri) => {
+                      const who = rnd.continueWith === "A" ? (pA?.name || "A") : rnd.continueWith === "B" ? (pB?.name || "B") : "—";
+                      let shape = null, driveYd = null, club = null;
+                      if (ri === 0) {
+                        shape = rnd.continueWith === "A" ? rnd.shapeA : rnd.continueWith === "B" ? rnd.shapeB : null;
+                        driveYd = rnd.continueWith === "A" ? rnd.driveYardsA : rnd.continueWith === "B" ? rnd.driveYardsB : null;
+                        club = rnd.continueWith === "A" ? rnd.clubA : rnd.continueWith === "B" ? rnd.clubB : null;
+                      } else {
+                        driveYd = rnd.shotYards ?? null;
+                        club = rnd.club ?? null;
+                      }
+                      const extra = [club, driveYd ? `${Math.round(displayDistance(driveYd, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : null].filter(Boolean).join(", ");
+                      const label = extra ? `${who} (${extra})` : who;
+                      return <ShotChip key={ri} label={label} colorKey={shape} />;
+                    })}
+                    {onGreenName && (
+                      <span style={{
+                        display: "inline-block", padding: "1px 5px", margin: "1px 2px 1px 0", borderRadius: 4,
+                        fontSize: 10, fontFamily: sans, fontWeight: 700, color: C.white, background: C.fairway,
+                        maxWidth: "100%", overflowWrap: "break-word",
+                      }}>
+                        ⛳ {onGreenName}
+                      </span>
+                    )}
+                  </td>
+                  <td style={bbTdStyle}>
+                    {putts ?? "—"}
+                    {detail?.puttMode === "better" && (
+                      <div style={{ fontSize: 9.5, fontFamily: sans, color: C.turf, fontWeight: 700, lineHeight: 1.3 }}>
+                        better ball{onGreenName ? ` (${onGreenName}'s)` : ""}
+                      </div>
+                    )}
+                    {detail?.puttMode === "own" && (
+                      <div style={{ fontSize: 9.5, fontFamily: sans, color: C.turf, fontWeight: 700, lineHeight: 1.3 }}>
+                        own: {pA?.name || "A"} {detail.ownPutts?.A ?? "—"} · {pB?.name || "B"} {detail.ownPutts?.B ?? "—"}
+                      </div>
+                    )}
+                    {pointWinnerLabel && (
+                      <div style={{ fontSize: 9.5, fontFamily: sans, color: C.ink, fontWeight: 700, lineHeight: 1.3, marginTop: 1 }}>
+                        Point: {pointWinnerLabel}
+                      </div>
+                    )}
+                  </td>
+                  <td style={bbTdStyle}>{team.holeScores[hn] ?? "—"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, marginTop: 4 }}>
+        Chip color: <span style={{ color: C.turf, fontWeight: 700 }}>green = fairway/on green</span>, <span style={{ color: C.flag, fontWeight: 700 }}>red = left</span>, <span style={{ color: C.brass, fontWeight: 700 }}>amber = right</span> (based on that hole's drive)
+      </div>
+      <div style={{ fontFamily: sans, fontSize: 12, color: C.ink, marginTop: 10, display: "grid", gap: 3, background: C.paper2, border: `1px solid ${C.line}`, borderRadius: 6, padding: "8px 10px" }}>
+        <div style={{ fontSize: 10, fontFamily: sans, color: C.turf, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em", marginBottom: 1 }}>Ball usage &amp; shots</div>
+        <div>Off the green — ball used: <b>{nameA} {usage.offGreen.A}</b> · <b>{nameB} {usage.offGreen.B}</b></div>
+        <div>On the green — ball used: <b>{nameA} {usage.onGreen.A}</b> · <b>{nameB} {usage.onGreen.B}</b></div>
+        <div>Total shots: <b>{nameA} {usage.shots.A}</b> · <b>{nameB} {usage.shots.B}</b></div>
+      </div>
+      <button style={{ ...btnGhost, fontSize: 12, padding: "6px 12px", marginTop: 8 }} onClick={() => setShowMoreStats((v) => !v)}>
+        {showMoreStats ? "Hide stats ↑" : "More stats →"}
+      </button>
+      {showMoreStats && (
+        <div style={{ fontFamily: sans, fontSize: 12, color: C.ink, marginTop: 8, display: "grid", gap: 10, background: C.paper2, border: `1px solid ${C.line}`, borderRadius: 6, padding: "8px 10px" }}>
+          <div>
+            <div style={{ fontSize: 10, fontFamily: sans, color: C.turf, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em", marginBottom: 3 }}>Fairways / greens hit off the tee</div>
+            <div>{nameA}: <b>{advanced.fairways.A.hit}/{advanced.fairways.A.attempts}</b> &nbsp;·&nbsp; {nameB}: <b>{advanced.fairways.B.hit}/{advanced.fairways.B.attempts}</b></div>
+          </div>
+          <div>
+            <div style={{ fontSize: 10, fontFamily: sans, color: C.turf, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em", marginBottom: 3 }}>Putting</div>
+            {["A", "B"].map((who) => {
+              const name = who === "A" ? nameA : nameB;
+              const dist = advanced.putts[who];
+              const anyPutts = puttKeys.some((k) => dist[k]);
+              return (
+                <div key={who} style={{ marginBottom: 2 }}>
+                  {name}: {anyPutts ? puttKeys.filter((k) => dist[k]).map((k) => `${k}-putt ×${dist[k]}`).join("  ·  ") : "no putts recorded"}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RoundDetailBetterBall({ round, players, courseHoles, distanceUnit }) {
   return (
     <div style={{ display: "grid", gap: 18 }}>
-      {round.teams.map((team, ti) => {
-        const pA = players.find((p) => p.id === team.playerIds[0]);
-        const pB = players.find((p) => p.id === team.playerIds[1]);
-        const color = ti === 0 ? C.team1 : C.team2;
-        const nameA = pA?.name || "A", nameB = pB?.name || "B";
-        const usage = bbPlayerUsageStats(team.holeDetails);
-        return (
-          <div key={ti}>
-            <div style={{ fontFamily: serif, fontSize: 15, color, marginBottom: 6 }}>
-              {team.name} — {pA?.name} & {pB?.name} — Total <b>{team.total}</b>
-            </div>
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ borderCollapse: "collapse", tableLayout: "fixed", fontFamily: mono, fontSize: 12, width: "100%" }}>
-                <colgroup>
-                  <col style={{ width: "12%" }} />
-                  <col style={{ width: "42%" }} />
-                  <col style={{ width: "28%" }} />
-                  <col style={{ width: "18%" }} />
-                </colgroup>
-                <thead><tr><th style={bbThStyle}>Hole</th><th style={bbThStyle}>Shots played from</th><th style={bbThStyle}>Putts</th><th style={bbThStyle}>Score</th></tr></thead>
-                <tbody>
-                  {Object.keys(team.holeScores).map((hn) => {
-                    const detail = team.holeDetails?.[hn];
-                    const putts = detail?.puttMode === "better" ? detail.betterPutts
-                      : detail?.puttMode === "own" ? Math.min(Number(detail.ownPutts?.A) || 99, Number(detail.ownPutts?.B) || 99)
-                      : null;
-                    /* whose ball actually reached the green this hole — the last recorded shot
-                       round's own continueWith (see BetterBallHoleCard's identical on-green
-                       banner, 14 Aug) — surfaced here too since the user reported it "nowhere...
-                       indicates" this in the history, only in scoring. Only meaningful once the
-                       hole was actually finished through the on-green flow (puttMode set). */
-                    const lastRnd = detail?.rounds?.[detail.rounds.length - 1];
-                    const onGreenWho = detail?.puttMode && lastRnd ? lastRnd.continueWith : null;
-                    const onGreenName = onGreenWho === "A" ? pA?.name : onGreenWho === "B" ? pB?.name : null;
-                    return (
-                      <tr key={hn}>
-                        <td style={bbTdStyle}>{hn}</td>
-                        <td style={{ ...bbTdStyle, display: "flex", flexWrap: "wrap", gap: 2 }}>
-                          {detail?.rounds?.map((rnd, ri) => {
-                            const who = rnd.continueWith === "A" ? (pA?.name || "A") : rnd.continueWith === "B" ? (pB?.name || "B") : "—";
-                            let shape = null, driveYd = null, club = null;
-                            if (ri === 0) {
-                              shape = rnd.continueWith === "A" ? rnd.shapeA : rnd.continueWith === "B" ? rnd.shapeB : null;
-                              driveYd = rnd.continueWith === "A" ? rnd.driveYardsA : rnd.continueWith === "B" ? rnd.driveYardsB : null;
-                              club = rnd.continueWith === "A" ? rnd.clubA : rnd.continueWith === "B" ? rnd.clubB : null;
-                            } else {
-                              driveYd = rnd.shotYards ?? null;
-                              club = rnd.club ?? null;
-                            }
-                            const extra = [club, driveYd ? `${Math.round(displayDistance(driveYd, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : null].filter(Boolean).join(", ");
-                            const label = extra ? `${who} (${extra})` : who;
-                            return <ShotChip key={ri} label={label} colorKey={shape} />;
-                          })}
-                          {onGreenName && (
-                            <span style={{
-                              display: "inline-block", padding: "1px 5px", margin: "1px 2px 1px 0", borderRadius: 4,
-                              fontSize: 10, fontFamily: sans, fontWeight: 700, color: C.white, background: C.fairway,
-                              maxWidth: "100%", overflowWrap: "break-word",
-                            }}>
-                              ⛳ {onGreenName}
-                            </span>
-                          )}
-                        </td>
-                        <td style={bbTdStyle}>
-                          {putts ?? "—"}
-                          {detail?.puttMode === "better" && (
-                            <div style={{ fontSize: 9.5, fontFamily: sans, color: C.turf, fontWeight: 700, lineHeight: 1.3 }}>
-                              better ball{onGreenName ? ` (${onGreenName}'s)` : ""}
-                            </div>
-                          )}
-                          {detail?.puttMode === "own" && (
-                            <div style={{ fontSize: 9.5, fontFamily: sans, color: C.turf, fontWeight: 700, lineHeight: 1.3 }}>
-                              own: {pA?.name || "A"} {detail.ownPutts?.A ?? "—"} · {pB?.name || "B"} {detail.ownPutts?.B ?? "—"}
-                            </div>
-                          )}
-                        </td>
-                        <td style={bbTdStyle}>{team.holeScores[hn] ?? "—"}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-            <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, marginTop: 4 }}>
-              Chip color: <span style={{ color: C.turf, fontWeight: 700 }}>green = fairway/on green</span>, <span style={{ color: C.flag, fontWeight: 700 }}>red = left</span>, <span style={{ color: C.brass, fontWeight: 700 }}>amber = right</span> (based on that hole's drive)
-            </div>
-            <div style={{ fontFamily: sans, fontSize: 12, color: C.ink, marginTop: 10, display: "grid", gap: 3, background: C.paper2, border: `1px solid ${C.line}`, borderRadius: 6, padding: "8px 10px" }}>
-              <div style={{ fontSize: 10, fontFamily: sans, color: C.turf, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em", marginBottom: 1 }}>Ball usage &amp; shots</div>
-              <div>Off the green — ball used: <b>{nameA} {usage.offGreen.A}</b> · <b>{nameB} {usage.offGreen.B}</b></div>
-              <div>On the green — ball used: <b>{nameA} {usage.onGreen.A}</b> · <b>{nameB} {usage.onGreen.B}</b></div>
-              <div>Total shots: <b>{nameA} {usage.shots.A}</b> · <b>{nameB} {usage.shots.B}</b></div>
-            </div>
-          </div>
-        );
-      })}
+      {round.teams.map((team, ti) => (
+        <BBTeamHistoryBlock key={ti} team={team} ti={ti} players={players} courseHoles={courseHoles} distanceUnit={distanceUnit} />
+      ))}
     </div>
   );
 }
@@ -4270,7 +4430,7 @@ function HistoryTab({ rounds, players, courses, distanceUnit }) {
             {isOpen && (
               <div style={{ marginTop: 10, borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
                 {isBB
-                  ? <RoundDetailBetterBall round={r} players={players} distanceUnit={distanceUnit} />
+                  ? <RoundDetailBetterBall round={r} players={players} courseHoles={course?.holes || []} distanceUnit={distanceUnit} />
                   : <RoundDetailStroke round={r} players={players} courseHoles={course?.holes || []} distanceUnit={distanceUnit} />}
               </div>
             )}
