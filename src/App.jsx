@@ -2580,13 +2580,19 @@ function computePendingShot({ hole, format, mePlayerId, selected, scores, bbStat
 function bbHoleScore(state) {
   if (!state || !state.onGreen || !state.puttMode) return null;
   const pre = state.rounds.length;
+  /* checks use "entered at all" (not blank/null) rather than truthy, since a hole-out or
+     chip-in is a legitimate 0-putt entry (15 Aug) — `!putts`/`!a`/`!b` would wrongly treat a
+     real "0" as "not entered yet" and hide the score. */
   if (state.puttMode === "better") {
+    if (state.betterPutts === "" || state.betterPutts == null) return null;
     const putts = Number(state.betterPutts);
-    if (!putts) return null;
+    if (isNaN(putts)) return null;
     return pre + putts;
   }
-  const a = Number(state.ownPutts.A), b = Number(state.ownPutts.B);
-  if (!a || !b) return null;
+  const rawA = state.ownPutts.A, rawB = state.ownPutts.B;
+  if (rawA === "" || rawA == null || rawB === "" || rawB == null) return null;
+  const a = Number(rawA), b = Number(rawB);
+  if (isNaN(a) || isNaN(b)) return null;
   return pre + Math.min(a, b);
 }
 
@@ -2601,7 +2607,10 @@ const puttPickerBtnStyle = {
 };
 function PuttPickerModal({ title, onSelect, onClose }) {
   const [extended, setExtended] = useState(false);
-  const nums = extended ? [6, 7, 8, 9, 10] : [1, 2, 3, 4, 5];
+  // starts at 0 (not 1) — a hole-out/chip-in means no putt was needed at all, which is a real,
+  // selectable outcome (15 Aug), not something outside the range. "+" still covers the rare
+  // longer putt (5-9).
+  const nums = extended ? [5, 6, 7, 8, 9] : [0, 1, 2, 3, 4];
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(20,20,16,0.55)", zIndex: 1100, display: "flex", alignItems: "center", justifyContent: "center", padding: 14 }} onClick={onClose}>
       <div style={{ background: C.paper, borderRadius: 10, padding: 18, width: "100%", maxWidth: 300 }} onClick={(e) => e.stopPropagation()}>
@@ -2839,6 +2848,7 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
       )}
       {puttPickerFor && (
         <PuttPickerModal
+          key={puttPickerFor}
           title={`${puttPickerFor === "A" ? playerAName : playerBName} — putts on hole ${hole.number}`}
           onSelect={(n) => {
             const nextOwn = { ...s.ownPutts, [puttPickerFor]: String(n) };
@@ -2850,7 +2860,15 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
               patchObj.betterPutts = nextOwn[onGreenWho] || "";
             }
             patch(patchObj);
-            setPuttPickerFor(null);
+            /* auto-advance to the other player if they haven't been entered yet (15 Aug — "once
+               the first player putt count is entered it auto jumps to next player putts...and
+               auto close after the last players putt count is entered"). If the other player
+               already has a value (this was a standalone edit of one player's count, not the
+               start of a fresh pair), just close instead of forcing a march through both again. */
+            const otherWho = puttPickerFor === "A" ? "B" : "A";
+            const otherVal = nextOwn[otherWho];
+            const otherEmpty = otherVal === "" || otherVal == null;
+            setPuttPickerFor(otherEmpty ? otherWho : null);
           }}
           onClose={() => setPuttPickerFor(null)}
         />
@@ -4162,8 +4180,11 @@ function bbAdvancedStats(holeDetails, courseHoles) {
     ["A", "B"].forEach((who) => {
       const raw = detail?.ownPutts?.[who];
       const n = raw !== "" && raw != null ? Number(raw) : null;
-      if (n != null && !isNaN(n) && n > 0) {
-        const key = n >= 4 ? "4+" : String(n);
+      /* n >= 0, not n > 0 — a hole-out/chip-in is a real, countable 0-putt hole (15 Aug), not
+         a "no data" case. Bucketed 0/1/2/3/4/5+ to match the picker's 0-4 main grid + "+" for
+         5-9 (see PuttPickerModal). */
+      if (n != null && !isNaN(n) && n >= 0) {
+        const key = n >= 5 ? "5+" : String(n);
         stats.putts[who][key] = (stats.putts[who][key] || 0) + 1;
       }
     });
@@ -4263,7 +4284,7 @@ function BBTeamHistoryBlock({ team, ti, players, courseHoles, distanceUnit }) {
   const nameA = pA?.name || "A", nameB = pB?.name || "B";
   const usage = bbPlayerUsageStats(team.holeDetails);
   const advanced = bbAdvancedStats(team.holeDetails, courseHoles);
-  const puttKeys = ["1", "2", "3", "4+"];
+  const puttKeys = ["0", "1", "2", "3", "4", "5+"];
   return (
     <div>
       <div style={{ fontFamily: serif, fontSize: 15, color, marginBottom: 6 }}>
@@ -4281,8 +4302,12 @@ function BBTeamHistoryBlock({ team, ti, players, courseHoles, distanceUnit }) {
           <tbody>
             {Object.keys(team.holeScores).map((hn) => {
               const detail = team.holeDetails?.[hn];
+              /* a hole-out/chip-in is a legitimate 0-putt entry, so this can't use "|| 99" —
+                 that would silently replace a real 0 with 99 (15 Aug fix). */
+              const ownA = detail?.ownPutts?.A, ownB = detail?.ownPutts?.B;
+              const ownPuttsValid = ownA !== "" && ownA != null && ownB !== "" && ownB != null;
               const putts = detail?.puttMode === "better" ? detail.betterPutts
-                : detail?.puttMode === "own" ? Math.min(Number(detail.ownPutts?.A) || 99, Number(detail.ownPutts?.B) || 99)
+                : detail?.puttMode === "own" && ownPuttsValid ? Math.min(Number(ownA), Number(ownB))
                 : null;
               /* whose ball actually reached the green this hole — the last recorded shot
                  round's own continueWith (see BetterBallHoleCard's identical on-green
@@ -4381,7 +4406,7 @@ function BBTeamHistoryBlock({ team, ti, players, courseHoles, distanceUnit }) {
               const anyPutts = puttKeys.some((k) => dist[k]);
               return (
                 <div key={who} style={{ marginBottom: 2 }}>
-                  {name}: {anyPutts ? puttKeys.filter((k) => dist[k]).map((k) => `${k}-putt ×${dist[k]}`).join("  ·  ") : "no putts recorded"}
+                  {name}: {anyPutts ? puttKeys.filter((k) => dist[k]).map((k) => `${k === "0" ? "hole-out" : `${k}-putt`} ×${dist[k]}`).join("  ·  ") : "no putts recorded"}
                 </div>
               );
             })}
