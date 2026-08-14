@@ -2624,6 +2624,13 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
   const lastRound = s.rounds[s.rounds.length - 1];
   const score = bbHoleScore(s);
   const liveLabel = score != null ? score : s.onGreen ? `${s.rounds.length}+` : `${s.rounds.length}`;
+  /* whose ball actually reached the green — the "On the green →" button (below) is disabled
+     until the last approach round's continueWith is set, so this is always resolvable once
+     s.onGreen is true. Surfaced prominently in the on-green panel per the user's 14 Aug report:
+     with two players both reaching the green, it wasn't at all clear which of their two balls
+     the team was now putting with — this is the fix. */
+  const onGreenWho = lastRound?.continueWith || null;
+  const onGreenName = onGreenWho === "A" ? playerAName : onGreenWho === "B" ? playerBName : null;
 
   return (
     <div style={{ border: `1px solid ${C.line}`, borderRadius: 8, padding: "10px 12px", background: C.white, flex: 1, minWidth: 260, maxWidth: "100%", boxSizing: "border-box" }}>
@@ -2751,6 +2758,10 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
 
       {s.onGreen && (
         <div style={{ fontFamily: sans, fontSize: 13 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
+            <span style={{ background: teamColor, color: C.white, fontSize: 10, fontWeight: 700, padding: "3px 7px", borderRadius: 4, letterSpacing: "0.03em" }}>⛳ ON THE GREEN</span>
+            {onGreenName && <span style={{ fontWeight: 700, color: C.ink }}>Playing {onGreenName}'s ball</span>}
+          </div>
           <div style={{ color: C.turf, marginBottom: 6 }}>{s.rounds.length} shot{s.rounds.length !== 1 ? "s" : ""} to reach the green</div>
           <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
             <button onClick={() => patch({ puttMode: "better" })} style={{ ...btnGhost, fontSize: 13, padding: "8px 14px", background: s.puttMode === "better" ? teamColor : C.white, color: s.puttMode === "better" ? C.white : teamColor, borderColor: teamColor }}>Putt better ball</button>
@@ -3989,12 +4000,62 @@ function ShotChip({ label, colorKey }) {
   const color = colorKey ? SHAPE_COLOR[colorKey] : C.line;
   return (
     <span style={{
-      display: "inline-block", padding: "2px 7px", margin: "1px 3px 1px 0", borderRadius: 4,
-      fontSize: 11, fontFamily: sans, fontWeight: 700, color: colorKey ? C.white : C.ink, background: color,
+      display: "inline-block", padding: "1px 5px", margin: "1px 2px 1px 0", borderRadius: 4,
+      fontSize: 10, fontFamily: sans, fontWeight: 700, color: colorKey ? C.white : C.ink, background: color,
+      maxWidth: "100%", overflowWrap: "break-word",
     }}>
       {label}
     </span>
   );
+}
+
+/* Tighter th/td styles for the Better Ball round-detail table (14 Aug) — the shared thStyle/
+   tdStyle were sized for the wider stroke-play tables and, combined with the "Putts" cell's
+   whiteSpace: "nowrap" sub-labels ("better ball (Name's)" / "own: A x · B y"), were forcing the
+   table wider than a phone screen so the Score column spilled off the right edge. These use
+   smaller padding/font and allow wrapping so every column stays inside the viewport. */
+const bbThStyle = { ...thStyle, padding: "6px 5px", fontSize: 10 };
+const bbTdStyle = { ...tdStyle, padding: "6px 5px", fontSize: 12, verticalAlign: "top", overflowWrap: "break-word" };
+
+/* Per-hole ball-usage + shot totals for a Better Ball team, derived entirely from data already
+   recorded (no new fields) — added 14 Aug per the user's request for these 3 stats:
+   how many times each player's ball was used off the green (every round's continueWith except
+   the hole's last one), how many times on the green (the last round's continueWith — the same
+   value used for the on-green banner/chip), and each player's total shot count. Shot totals are
+   an approximation faithful to what this app actually tracks: both players are recorded hitting
+   their own tee shot every hole (round 0), but from round 1 onward only the ball that was
+   selected to continue gets its shots recorded (the other ball is treated as picked up) — so a
+   "total shots" here means shots recorded for the ball actually played, not two fully independent
+   scorecards. */
+function bbPlayerUsageStats(holeDetails) {
+  const stats = { offGreen: { A: 0, B: 0 }, onGreen: { A: 0, B: 0 }, shots: { A: 0, B: 0 } };
+  Object.values(holeDetails || {}).forEach((detail) => {
+    const rounds = detail?.rounds;
+    if (!rounds || !rounds.length) return;
+    stats.shots.A += 1; // both players always hit a tee shot (round 0)
+    stats.shots.B += 1;
+    for (let i = 0; i < rounds.length - 1; i++) {
+      const who = rounds[i].continueWith;
+      if (who === "A" || who === "B") stats.offGreen[who] += 1;
+    }
+    for (let i = 1; i < rounds.length; i++) {
+      const who = rounds[i - 1].continueWith;
+      if (who === "A" || who === "B") stats.shots[who] += 1;
+    }
+    if (detail.puttMode) {
+      const lastWho = rounds[rounds.length - 1].continueWith;
+      if (lastWho === "A" || lastWho === "B") stats.onGreen[lastWho] += 1;
+      if (detail.puttMode === "better") {
+        const putts = Number(detail.betterPutts);
+        if (!isNaN(putts) && lastWho) stats.shots[lastWho] += putts;
+      } else if (detail.puttMode === "own") {
+        const a = Number(detail.ownPutts?.A), b = Number(detail.ownPutts?.B);
+        if (!isNaN(a)) stats.shots.A += a;
+        if (!isNaN(b)) stats.shots.B += b;
+      }
+    }
+  });
+  return stats;
 }
 
 function RoundDetailStroke({ round, players, courseHoles, distanceUnit }) {
@@ -4086,24 +4147,40 @@ function RoundDetailBetterBall({ round, players, distanceUnit }) {
         const pA = players.find((p) => p.id === team.playerIds[0]);
         const pB = players.find((p) => p.id === team.playerIds[1]);
         const color = ti === 0 ? C.team1 : C.team2;
+        const nameA = pA?.name || "A", nameB = pB?.name || "B";
+        const usage = bbPlayerUsageStats(team.holeDetails);
         return (
           <div key={ti}>
             <div style={{ fontFamily: serif, fontSize: 15, color, marginBottom: 6 }}>
               {team.name} — {pA?.name} & {pB?.name} — Total <b>{team.total}</b>
             </div>
             <div style={{ overflowX: "auto" }}>
-              <table style={{ borderCollapse: "collapse", fontFamily: mono, fontSize: 12, width: "100%" }}>
-                <thead><tr><th style={thStyle}>Hole</th><th style={thStyle}>Shots played from</th><th style={thStyle}>Putts</th><th style={thStyle}>Score</th></tr></thead>
+              <table style={{ borderCollapse: "collapse", tableLayout: "fixed", fontFamily: mono, fontSize: 12, width: "100%" }}>
+                <colgroup>
+                  <col style={{ width: "12%" }} />
+                  <col style={{ width: "42%" }} />
+                  <col style={{ width: "28%" }} />
+                  <col style={{ width: "18%" }} />
+                </colgroup>
+                <thead><tr><th style={bbThStyle}>Hole</th><th style={bbThStyle}>Shots played from</th><th style={bbThStyle}>Putts</th><th style={bbThStyle}>Score</th></tr></thead>
                 <tbody>
                   {Object.keys(team.holeScores).map((hn) => {
                     const detail = team.holeDetails?.[hn];
                     const putts = detail?.puttMode === "better" ? detail.betterPutts
                       : detail?.puttMode === "own" ? Math.min(Number(detail.ownPutts?.A) || 99, Number(detail.ownPutts?.B) || 99)
                       : null;
+                    /* whose ball actually reached the green this hole — the last recorded shot
+                       round's own continueWith (see BetterBallHoleCard's identical on-green
+                       banner, 14 Aug) — surfaced here too since the user reported it "nowhere...
+                       indicates" this in the history, only in scoring. Only meaningful once the
+                       hole was actually finished through the on-green flow (puttMode set). */
+                    const lastRnd = detail?.rounds?.[detail.rounds.length - 1];
+                    const onGreenWho = detail?.puttMode && lastRnd ? lastRnd.continueWith : null;
+                    const onGreenName = onGreenWho === "A" ? pA?.name : onGreenWho === "B" ? pB?.name : null;
                     return (
                       <tr key={hn}>
-                        <td style={tdStyle}>{hn}</td>
-                        <td style={tdStyle}>
+                        <td style={bbTdStyle}>{hn}</td>
+                        <td style={{ ...bbTdStyle, display: "flex", flexWrap: "wrap", gap: 2 }}>
                           {detail?.rounds?.map((rnd, ri) => {
                             const who = rnd.continueWith === "A" ? (pA?.name || "A") : rnd.continueWith === "B" ? (pB?.name || "B") : "—";
                             let shape = null, driveYd = null, club = null;
@@ -4119,19 +4196,30 @@ function RoundDetailBetterBall({ round, players, distanceUnit }) {
                             const label = extra ? `${who} (${extra})` : who;
                             return <ShotChip key={ri} label={label} colorKey={shape} />;
                           })}
+                          {onGreenName && (
+                            <span style={{
+                              display: "inline-block", padding: "1px 5px", margin: "1px 2px 1px 0", borderRadius: 4,
+                              fontSize: 10, fontFamily: sans, fontWeight: 700, color: C.white, background: C.fairway,
+                              maxWidth: "100%", overflowWrap: "break-word",
+                            }}>
+                              ⛳ {onGreenName}
+                            </span>
+                          )}
                         </td>
-                        <td style={tdStyle}>
+                        <td style={bbTdStyle}>
                           {putts ?? "—"}
                           {detail?.puttMode === "better" && (
-                            <div style={{ fontSize: 10, fontFamily: sans, color: C.turf, fontWeight: 700, whiteSpace: "nowrap" }}>better ball</div>
+                            <div style={{ fontSize: 9.5, fontFamily: sans, color: C.turf, fontWeight: 700, lineHeight: 1.3 }}>
+                              better ball{onGreenName ? ` (${onGreenName}'s)` : ""}
+                            </div>
                           )}
                           {detail?.puttMode === "own" && (
-                            <div style={{ fontSize: 10, fontFamily: sans, color: C.turf, fontWeight: 700, whiteSpace: "nowrap" }}>
+                            <div style={{ fontSize: 9.5, fontFamily: sans, color: C.turf, fontWeight: 700, lineHeight: 1.3 }}>
                               own: {pA?.name || "A"} {detail.ownPutts?.A ?? "—"} · {pB?.name || "B"} {detail.ownPutts?.B ?? "—"}
                             </div>
                           )}
                         </td>
-                        <td style={tdStyle}>{team.holeScores[hn] ?? "—"}</td>
+                        <td style={bbTdStyle}>{team.holeScores[hn] ?? "—"}</td>
                       </tr>
                     );
                   })}
@@ -4140,6 +4228,12 @@ function RoundDetailBetterBall({ round, players, distanceUnit }) {
             </div>
             <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, marginTop: 4 }}>
               Chip color: <span style={{ color: C.turf, fontWeight: 700 }}>green = fairway/on green</span>, <span style={{ color: C.flag, fontWeight: 700 }}>red = left</span>, <span style={{ color: C.brass, fontWeight: 700 }}>amber = right</span> (based on that hole's drive)
+            </div>
+            <div style={{ fontFamily: sans, fontSize: 12, color: C.ink, marginTop: 10, display: "grid", gap: 3, background: C.paper2, border: `1px solid ${C.line}`, borderRadius: 6, padding: "8px 10px" }}>
+              <div style={{ fontSize: 10, fontFamily: sans, color: C.turf, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em", marginBottom: 1 }}>Ball usage &amp; shots</div>
+              <div>Off the green — ball used: <b>{nameA} {usage.offGreen.A}</b> · <b>{nameB} {usage.offGreen.B}</b></div>
+              <div>On the green — ball used: <b>{nameA} {usage.onGreen.A}</b> · <b>{nameB} {usage.onGreen.B}</b></div>
+              <div>Total shots: <b>{nameA} {usage.shots.A}</b> · <b>{nameB} {usage.shots.B}</b></div>
             </div>
           </div>
         );
