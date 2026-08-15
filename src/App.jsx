@@ -1035,7 +1035,7 @@ function GreenTargetToggle({ value, onChange }) {
           key={opt}
           onClick={() => onChange(opt)}
           style={{
-            fontSize: 10.5, fontFamily: sans, fontWeight: 700, padding: "3px 8px", cursor: "pointer",
+            fontSize: 11.5, fontFamily: sans, fontWeight: 700, padding: "4px 9px", cursor: "pointer",
             border: "none", textTransform: "capitalize",
             background: value === opt ? C.fairway : C.white,
             color: value === opt ? C.white : C.turf,
@@ -3331,10 +3331,15 @@ function BetterBallFocusedHole({
           <div style={{ fontFamily: serif, fontSize: 36, color: C.fairway, lineHeight: 1 }}>{hole.number}</div>
           {/* stretched to the same height as the hole number (16 Aug fix) — Par/SI used to sit on
               its text baseline via alignItems: "baseline", which visually left them floating low
-              relative to the big number instead of evenly spanning its height */}
+              relative to the big number instead of evenly spanning its height. Static yardage
+              (19 Aug) moved down here from the right-hand column, next to Par/SI — it's fixed
+              per-hole data, not something that belongs beside the GPS-driven live distance, whose
+              width changes as position updates arrive and was making that side of the header
+              visibly shift during play. */}
           <div style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", fontFamily: sans, fontSize: 12, color: C.turf, lineHeight: 1.2 }}>
             <div>Par <b style={{ color: C.ink, fontSize: 14 }}>{hole.par}</b></div>
             {hole.strokeIndex ? <div>SI <b style={{ color: C.ink, fontSize: 14 }}>{hole.strokeIndex}</b></div> : null}
+            {hole.yardage ? <div>Dist <b style={{ color: C.ink, fontSize: 16 }}>{displayDistance(hole.yardage, distanceUnit)}{unitLabel}</b></div> : null}
           </div>
         </div>
         <div style={{ textAlign: "right", fontFamily: sans, fontSize: 12, color: C.turf, flexShrink: 0 }}>
@@ -3343,19 +3348,14 @@ function BetterBallFocusedHole({
               <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} />
             </div>
           )}
-          {(hole.yardage || liveYards != null) && (
+          {liveYards != null && (
             <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end", marginTop: 2 }}>
-              {hole.yardage ? <div>{displayDistance(hole.yardage, distanceUnit)}{unitLabel}</div> : null}
-              {liveYards != null && (
-                <>
-                  <div style={{ color: C.fairway, fontWeight: 700 }}>📍 {Math.round(displayDistance(liveYards, distanceUnit))}{unitLabel}</div>
-                  <RangefinderNote playsAsYards={rangefinder.playsAsYards} distanceUnit={distanceUnit} />
-                </>
-              )}
+              <div style={{ color: C.fairway, fontWeight: 700 }}>📍 {Math.round(displayDistance(liveYards, distanceUnit))}{unitLabel}</div>
+              <RangefinderNote playsAsYards={rangefinder.playsAsYards} distanceUnit={distanceUnit} />
             </div>
           )}
           {hole.greenLat != null && (
-            <button style={{ ...btnGhost, fontSize: 10.5, padding: "3px 8px", marginTop: 4 }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
+            <button style={{ ...btnGhost, fontSize: 12.5, padding: "5px 10px", marginTop: 4 }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
           )}
         </div>
       </div>
@@ -3451,10 +3451,15 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
           <div style={{ fontFamily: serif, fontSize: 36, color: C.fairway, lineHeight: 1 }}>{hole.number}</div>
           {/* stretched to the same height as the hole number (16 Aug fix) — Par/SI used to sit on
               its text baseline via alignItems: "baseline", which visually left them floating low
-              relative to the big number instead of evenly spanning its height */}
+              relative to the big number instead of evenly spanning its height. Static yardage
+              (19 Aug) moved down here from the right-hand column, next to Par/SI — it's fixed
+              per-hole data, not something that belongs beside the GPS-driven live distance, whose
+              width changes as position updates arrive and was making that side of the header
+              visibly shift during play. */}
           <div style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", fontFamily: sans, fontSize: 12, color: C.turf, lineHeight: 1.2 }}>
             <div>Par <b style={{ color: C.ink, fontSize: 14 }}>{hole.par}</b></div>
             {hole.strokeIndex ? <div>SI <b style={{ color: C.ink, fontSize: 14 }}>{hole.strokeIndex}</b></div> : null}
+            {hole.yardage ? <div>Dist <b style={{ color: C.ink, fontSize: 16 }}>{displayDistance(hole.yardage, distanceUnit)}{unitLabel}</b></div> : null}
           </div>
         </div>
         <div style={{ textAlign: "right", fontFamily: sans, fontSize: 12, color: C.turf, flexShrink: 0 }}>
@@ -3463,20 +3468,15 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
               <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} />
             </div>
           )}
-          {(hole.yardage || liveYards != null) && (
+          {liveYards != null && (
             <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end", marginTop: 2 }}>
-              {hole.yardage ? <div>{displayDistance(hole.yardage, distanceUnit)}{unitLabel}</div> : null}
-              {liveYards != null && (
-                <>
-                  <div style={{ color: C.fairway, fontWeight: 700 }}>📍 {Math.round(displayDistance(liveYards, distanceUnit))}{unitLabel}</div>
-                  <RangefinderNote playsAsYards={rangefinder.playsAsYards} distanceUnit={distanceUnit} />
-                </>
-              )}
+              <div style={{ color: C.fairway, fontWeight: 700 }}>📍 {Math.round(displayDistance(liveYards, distanceUnit))}{unitLabel}</div>
+              <RangefinderNote playsAsYards={rangefinder.playsAsYards} distanceUnit={distanceUnit} />
             </div>
           )}
           {suggestion && <div style={{ color: C.fairway }}>🎒 {suggestion}</div>}
           {hole.greenLat != null && (
-            <button style={{ ...btnGhost, fontSize: 10.5, padding: "3px 8px", marginTop: 4 }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
+            <button style={{ ...btnGhost, fontSize: 12.5, padding: "5px 10px", marginTop: 4 }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
           )}
         </div>
       </div>
