@@ -3317,6 +3317,51 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
   );
 }
 
+/* left-hand "hole data" cluster shared by both hole headers (StrokeHoleCard/BetterBallFocusedHole,
+   19 Aug): the big hole number + Par/SI, with the static yardage centered on its own line beneath
+   both. The yardage row needs to span exactly as wide as the number+Par/SI row above it — CSS's
+   own flex/grid "stretch" turned out not reliable enough for this in practice (in some renders it
+   sizes the yardage row to little more than its own text, e.g. on the user's actual phone, even
+   though it can behave differently in a plain desktop-browser check), so instead this measures
+   the row's real rendered width via ResizeObserver and applies that as an explicit pixel width —
+   guaranteed correct regardless of font metrics, hole-to-hole content differences (single vs
+   double-digit SI, missing SI, unit label length), or browser quirks. Re-measures whenever the
+   row's content could change size (hole/unit changes drive that through the effect below via the
+   values baked into rowKey). */
+function HoleDataCluster({ hole, distanceUnit, unitLabel }) {
+  const rowRef = useRef(null);
+  const [rowWidth, setRowWidth] = useState(null);
+  const rowKey = `${hole.number}-${hole.par}-${hole.strokeIndex}-${distanceUnit}`;
+  useEffect(() => {
+    const el = rowRef.current;
+    if (!el) return;
+    const measure = () => setRowWidth(el.getBoundingClientRect().width);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [rowKey]);
+  return (
+    <div style={{ minWidth: 0 }}>
+      <div ref={rowRef} style={{ display: "flex", alignItems: "stretch", gap: 12 }}>
+        <div style={{ fontFamily: serif, fontSize: 36, color: C.fairway, lineHeight: 1 }}>{hole.number}</div>
+        {/* stretched to the same height as the hole number (16 Aug fix) — Par/SI used to sit on
+            its text baseline via alignItems: "baseline", which visually left them floating low
+            relative to the big number instead of evenly spanning its height. */}
+        <div style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", fontFamily: sans, fontSize: 12, color: C.turf, lineHeight: 1.2 }}>
+          <div>Par <b style={{ color: C.ink, fontSize: 14 }}>{hole.par}</b></div>
+          {hole.strokeIndex ? <div>SI <b style={{ color: C.ink, fontSize: 14 }}>{hole.strokeIndex}</b></div> : null}
+        </div>
+      </div>
+      {hole.yardage ? (
+        <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, textAlign: "center", marginTop: 3, width: rowWidth ?? undefined }}>
+          Dist <b style={{ color: C.ink, fontSize: 16 }}>{displayDistance(hole.yardage, distanceUnit)}{unitLabel}</b>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 /* single "focused" hole in the per-hole better-ball scoring view — same hole-number/par/stroke
    index/distance header as the stroke-play version, wrapping the existing per-team
    BetterBallHoleCard(s) side by side underneath, plus the same Next/Finish hole button. */
@@ -3335,38 +3380,15 @@ function BetterBallFocusedHole({
   return (
     <div style={{ padding: 12, background: C.white }}>
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 10, gap: 8 }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "stretch", gap: 12 }}>
-            <div style={{ fontFamily: serif, fontSize: 36, color: C.fairway, lineHeight: 1 }}>{hole.number}</div>
-            {/* stretched to the same height as the hole number (16 Aug fix) — Par/SI used to sit on
-                its text baseline via alignItems: "baseline", which visually left them floating low
-                relative to the big number instead of evenly spanning its height. */}
-            <div style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", fontFamily: sans, fontSize: 12, color: C.turf, lineHeight: 1.2 }}>
-              <div>Par <b style={{ color: C.ink, fontSize: 14 }}>{hole.par}</b></div>
-              {hole.strokeIndex ? <div>SI <b style={{ color: C.ink, fontSize: 14 }}>{hole.strokeIndex}</b></div> : null}
-            </div>
-          </div>
-          {/* static yardage (19 Aug, widened 19 Aug) — its own full-width row underneath the
-              hole number + Par/SI row rather than squeezed into the narrow Par/SI column, since
-              this outer flex column stretches (the default cross-axis behavior) each row to the
-              width of the widest one, i.e. the number+Par/SI row above it. Deliberately kept off
-              the right-hand column: it's fixed per-hole data, not something that belongs beside
-              the GPS-driven live distance, whose width changes as position updates arrive and was
-              making that side of the header visibly shift during play. */}
-          {hole.yardage ? (
-            <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, textAlign: "center" }}>
-              Dist <b style={{ color: C.ink, fontSize: 16 }}>{displayDistance(hole.yardage, distanceUnit)}{unitLabel}</b>
-            </div>
-          ) : null}
-        </div>
-        <div style={{ textAlign: "right", fontFamily: sans, fontSize: 12, color: C.turf, flexShrink: 0 }}>
+        <HoleDataCluster hole={hole} distanceUnit={distanceUnit} unitLabel={unitLabel} />
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", fontFamily: sans, fontSize: 12, color: C.turf, flexShrink: 0 }}>
           {hole.greenPolygon?.length > 0 && (
-            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 6 }}>
+            <div style={{ marginBottom: 6 }}>
               <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} width={132} height={30} />
             </div>
           )}
           {liveYards != null && (
-            <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end", marginTop: 2 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2 }}>
               <div style={{ color: C.fairway, fontWeight: 700 }}>📍 {Math.round(displayDistance(liveYards, distanceUnit))}{unitLabel}</div>
               <RangefinderNote playsAsYards={rangefinder.playsAsYards} distanceUnit={distanceUnit} />
             </div>
@@ -3464,38 +3486,15 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
   return (
     <div style={{ padding: 12, background: C.white }}>
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 10, gap: 8 }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "stretch", gap: 12 }}>
-            <div style={{ fontFamily: serif, fontSize: 36, color: C.fairway, lineHeight: 1 }}>{hole.number}</div>
-            {/* stretched to the same height as the hole number (16 Aug fix) — Par/SI used to sit on
-                its text baseline via alignItems: "baseline", which visually left them floating low
-                relative to the big number instead of evenly spanning its height. */}
-            <div style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", fontFamily: sans, fontSize: 12, color: C.turf, lineHeight: 1.2 }}>
-              <div>Par <b style={{ color: C.ink, fontSize: 14 }}>{hole.par}</b></div>
-              {hole.strokeIndex ? <div>SI <b style={{ color: C.ink, fontSize: 14 }}>{hole.strokeIndex}</b></div> : null}
-            </div>
-          </div>
-          {/* static yardage (19 Aug, widened 19 Aug) — its own full-width row underneath the
-              hole number + Par/SI row rather than squeezed into the narrow Par/SI column, since
-              this outer flex column stretches (the default cross-axis behavior) each row to the
-              width of the widest one, i.e. the number+Par/SI row above it. Deliberately kept off
-              the right-hand column: it's fixed per-hole data, not something that belongs beside
-              the GPS-driven live distance, whose width changes as position updates arrive and was
-              making that side of the header visibly shift during play. */}
-          {hole.yardage ? (
-            <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, textAlign: "center" }}>
-              Dist <b style={{ color: C.ink, fontSize: 16 }}>{displayDistance(hole.yardage, distanceUnit)}{unitLabel}</b>
-            </div>
-          ) : null}
-        </div>
-        <div style={{ textAlign: "right", fontFamily: sans, fontSize: 12, color: C.turf, flexShrink: 0 }}>
+        <HoleDataCluster hole={hole} distanceUnit={distanceUnit} unitLabel={unitLabel} />
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", fontFamily: sans, fontSize: 12, color: C.turf, flexShrink: 0 }}>
           {hole.greenPolygon?.length > 0 && (
-            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 6 }}>
+            <div style={{ marginBottom: 6 }}>
               <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} width={132} height={30} />
             </div>
           )}
           {liveYards != null && (
-            <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end", marginTop: 2 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2 }}>
               <div style={{ color: C.fairway, fontWeight: 700 }}>📍 {Math.round(displayDistance(liveYards, distanceUnit))}{unitLabel}</div>
               <RangefinderNote playsAsYards={rangefinder.playsAsYards} distanceUnit={distanceUnit} />
             </div>
