@@ -514,6 +514,41 @@ async function searchOSMCourses(query) {
   }));
 }
 
+/* rating/slope auto-fill (19 Aug) — GolfCourseAPI lookup by name, proxied server-side (see
+   api/course-rating.js) so the account's API key never reaches the browser. Fired alongside the
+   OSM hole lookup whenever a course is picked (see pickOSMResult) — best-effort and silent on
+   any failure (network, no match, key not configured yet): a missing/failed rating lookup should
+   never block adding a course, the Rating/Slope fields just stay exactly as manually-editable as
+   they always were. Returns the single most relevant match (GolfCourseAPI returns results
+   ranked by relevance) or null. */
+async function lookupCourseRating(query) {
+  try {
+    const res = await fetchWithTimeout(`/api/course-rating?q=${encodeURIComponent(query)}`, { headers: { Accept: "application/json" } }, 10000);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data && Array.isArray(data.courses) && data.courses.length ? data.courses[0] : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/* matches a GolfCourseAPI tee_name (e.g. "White Re-Rate 1", "Blue/Red (w)", "Yellow") against
+   one of our own TEE_PRESETS colors, for lining up which of a course's several rated tees
+   corresponds to which color the app already knows about. Strips the "(w)" gender marker and
+   "Re-Rate N" revision suffix real rating data commonly carries, then requires a whole-word match
+   so e.g. "Blue/Red" doesn't falsely match plain "Red" (that combined tee is a genuinely
+   different, unrelated set of markers on the course, not a Red variant). */
+function matchTeePreset(apiTeeName) {
+  const cleaned = String(apiTeeName || "").toLowerCase().replace(/\(w\)/g, "").replace(/re-rate\s*\d*/g, "").trim();
+  // a combined tee like "Blue/Red" is a genuinely distinct set of markers, not a variant of
+  // either color alone — without this guard, \bblue\b matches inside "blue/red" too (the "/" is
+  // a non-word character, same as a space, so it still counts as a word boundary), which would
+  // wrongly fold a combo tee's rating into the plain "Blue" tee's slot. Confirmed against
+  // Steenberg Golf Club's real API response (19 Aug), which has exactly this "Blue/Red" tee.
+  if (cleaned.includes("/")) return undefined;
+  return TEE_PRESETS.find((p) => new RegExp(`\\b${p.name.toLowerCase()}\\b`).test(cleaned));
+}
+
 /* "Find courses near me" — Overpass direct geographic search (leisure=golf_course within a
    radius), as an alternative to searching by name. Returns candidates in the same shape
    searchOSMCourses does (including a boundingbox), so callers can feed a result straight into
@@ -2077,6 +2112,12 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
      handleTeeColorChange, the demoted tee's "📍 OSM" badge (see extraTees.map render) stays
      accurate instead of always reading as manually-entered. */
   const [primaryFromOSM, setPrimaryFromOSM] = useState(false);
+  /* which club GolfCourseAPI's rating/slope auto-fill (19 Aug) actually matched, if any — shown
+     as a small caption under the Rating/Slope fields so it's clear where those numbers came from
+     and that they're worth a glance before saving, without adding a whole status panel the way
+     the OSM section has. Null whenever nothing was auto-filled (no match, lookup failed, key not
+     configured) — those numbers just stay exactly as manually-editable as before this existed. */
+  const [ratingSource, setRatingSource] = useState(null);
   const [manualLat, setManualLat] = useState("");
   const [manualLon, setManualLon] = useState("");
   const [holes, setHoles] = useState(
@@ -2156,6 +2197,13 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
     setOsmResults([]);
     setLastOSMCandidate(candidate);
 
+    // rating/slope (19 Aug) — kicked off here, in parallel with the OSM hole lookup below, since
+    // picking a course is the one moment we have a real course name to search GolfCourseAPI
+    // with. Not awaited yet, so it runs concurrently rather than adding to the wait; applied
+    // once both it and the OSM lookup have settled (see applyCourseRating calls below), since
+    // the extra-tee color matching it does needs applyOSMHoles' extraTees already in place.
+    const ratingPromise = lookupCourseRating(candidate.name);
+
     const key = osmCacheKey(candidate);
     const cached = osmCache[key];
     if (cached) {
@@ -2163,6 +2211,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
       // `teeSets` field at all — applyOSMHoles treats that the same as "none found", so a
       // course cached before this feature simply won't show tee colors until a Refresh
       applyOSMHoles(cached.holes, cached.teeSets, cached.cachedAt);
+      applyCourseRating(await ratingPromise);
       setOsmLoading(false);
       return;
     }
@@ -2176,6 +2225,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
       setOsmFailed(true);
       setOsmStatus("Location set, but OpenStreetMap's hole-data service (Overpass) is currently rejecting requests — it's a known, widespread issue with the free public service, not specific to this device or how the app is hosted. Try the retry button below in a minute (it tries 3 different mirrors), or enter holes manually.");
     }
+    applyCourseRating(await ratingPromise);
     setOsmLoading(false);
   }
 
@@ -2261,6 +2311,29 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
     }
   }
 
+  /* rating/slope auto-fill (19 Aug) — applies a GolfCourseAPI match (see lookupCourseRating,
+     fired from pickOSMResult) to the primary Rating/Slope fields, and best-effort backfills any
+     existing extra tee whose color it can also match. `course` is null on no-match/failure/
+     not-yet-configured, in which case this is a no-op — the fields stay exactly as
+     manually-editable as they've always been. Runs after applyOSMHoles so extraTees already
+     reflects whatever OSM detected. */
+  function applyCourseRating(course) {
+    if (!course || !course.tees) return;
+    const teeList = (course.tees.male && course.tees.male.length ? course.tees.male : course.tees.female) || [];
+    if (!teeList.length) return;
+    const primaryKey = teeColor.trim().toLowerCase();
+    const primaryMatch = teeList.find((t) => matchTeePreset(t.tee_name)?.name.toLowerCase() === primaryKey) || teeList[0];
+    if (primaryMatch.course_rating != null) setRating(String(primaryMatch.course_rating));
+    if (primaryMatch.slope_rating != null) setSlope(String(primaryMatch.slope_rating));
+    setExtraTees((prev) => prev.map((t) => {
+      if (t.rating) return t; // don't clobber anything already filled in
+      const m = teeList.find((apiTee) => matchTeePreset(apiTee.tee_name)?.name === t.name);
+      if (!m) return t;
+      return { ...t, rating: m.course_rating != null ? String(m.course_rating) : t.rating, slope: m.slope_rating != null ? String(m.slope_rating) : t.slope };
+    }));
+    setRatingSource(course.club_name || course.course_name || "GolfCourseAPI");
+  }
+
   /* fires when the "par/distance table above is from the ___ tees" dropdown changes. Simply
      relabeling teeColor (the old behavior) left the table showing stale numbers from whatever
      tee was primary at OSM-fetch time — reported by the user as "the yardages don't change when
@@ -2327,6 +2400,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
     setHoles(Array.from({ length: 18 }, (_, i) => ({ number: i + 1, par: 4, yardage: "", strokeIndex: "", teeLat: null, teeLon: null, greenLat: null, greenLon: null, greenPolygon: null })));
     setOsmQuery(""); setOsmResults([]); setOsmStatus(""); setOsmFailed(false); setLastOSMCandidate(null); setOsmFromCache(false);
     setTeeColor("White"); setExtraTees([]); setPrimaryFromOSM(false);
+    setRatingSource(null);
     setAdding(false);
   }
   function updateHoleCount(n) {
@@ -2448,9 +2522,20 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
                 <option value={18}>18</option>
               </select>
             </Field>
-            <Field label="Rating (optional)"><input style={inputStyle} value={rating} onChange={(e) => setRating(e.target.value)} placeholder="e.g. 71.2" /></Field>
-            <Field label="Slope (optional)"><input style={inputStyle} value={slope} onChange={(e) => setSlope(e.target.value)} placeholder="e.g. 128" /></Field>
+            <Field label="Rating (optional)"><input style={inputStyle} value={rating} onChange={(e) => { setRating(e.target.value); setRatingSource(null); }} placeholder="e.g. 71.2" /></Field>
+            <Field label="Slope (optional)"><input style={inputStyle} value={slope} onChange={(e) => { setSlope(e.target.value); setRatingSource(null); }} placeholder="e.g. 128" /></Field>
           </div>
+
+          {/* rating/slope auto-fill note (19 Aug) — appears once picking a course (by name search
+              or "Find courses near me") triggers a successful GolfCourseAPI match; see
+              applyCourseRating. Deliberately just this one small line rather than a status panel
+              like the OSM section below has, per explicit "already extremely cluttered" feedback
+              — this is a bonus, silent-on-failure lookup, not a step the user has to look at. */}
+          {ratingSource && (
+            <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, marginTop: -8, marginBottom: 14 }}>
+              ✓ Rating/Slope from GolfCourseAPI — matched "{ratingSource}". Double-check against your tees before saving; edit above if it's wrong.
+            </div>
+          )}
 
           <div style={{ background: C.paper, border: `1px solid ${C.line}`, borderRadius: 6, padding: 12, marginBottom: 14 }}>
             <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, marginBottom: 8 }}>
