@@ -3317,17 +3317,30 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
   );
 }
 
+/* shared scratch <canvas> for measuring text width (19 Aug, see HoleDataCluster below) — a single
+   lazily-created 2D context reused across every measurement rather than a hidden cloned DOM
+   element per call, so auto-fitting the yardage line costs no extra render pass or layout flash. */
+let _measureCanvas = null;
+function measureTextWidth(text, font) {
+  if (!_measureCanvas) _measureCanvas = document.createElement("canvas");
+  const ctx = _measureCanvas.getContext("2d");
+  ctx.font = font;
+  return ctx.measureText(text).width;
+}
+
 /* left-hand "hole data" cluster shared by both hole headers (StrokeHoleCard/BetterBallFocusedHole,
-   19 Aug): the big hole number + Par/SI, with the static yardage centered on its own line beneath
-   both. The yardage row needs to span exactly as wide as the number+Par/SI row above it — CSS's
-   own flex/grid "stretch" turned out not reliable enough for this in practice (in some renders it
-   sizes the yardage row to little more than its own text, e.g. on the user's actual phone, even
-   though it can behave differently in a plain desktop-browser check), so instead this measures
-   the row's real rendered width via ResizeObserver and applies that as an explicit pixel width —
-   guaranteed correct regardless of font metrics, hole-to-hole content differences (single vs
-   double-digit SI, missing SI, unit label length), or browser quirks. Re-measures whenever the
-   row's content could change size (hole/unit changes drive that through the effect below via the
-   values baked into rowKey). */
+   19 Aug): the big hole number + Par/SI, with the static yardage on its own line beneath both.
+   The yardage line auto-fits the row's width above it (19 Aug follow-up, per explicit request —
+   the number of digits varies hole to hole, e.g. "393m" vs a much longer yardage in yards, so a
+   fixed font size left uneven whitespace on the shorter ones): it measures the row's real
+   rendered width via ResizeObserver, measures the yardage text's own natural width at its base
+   font sizes via the canvas helper above, and scales the font size by the ratio between the two
+   — so the text itself grows/shrinks to run edge-to-edge under the row, not just a fixed-size
+   label sitting inside a wider centered box. Label and value scale together (same factor) so the
+   value stays visually bigger/bolder than the "Dist" label, just larger or smaller as a pair.
+   Scale is clamped to a sane range and biased very slightly down (0.99×) so a font-metric rounding
+   difference between the canvas measurement and the real rendered text can't cause it to overflow
+   the row's width by a pixel or two. */
 function HoleDataCluster({ hole, distanceUnit, unitLabel }) {
   const rowRef = useRef(null);
   const [rowWidth, setRowWidth] = useState(null);
@@ -3341,6 +3354,18 @@ function HoleDataCluster({ hole, distanceUnit, unitLabel }) {
     ro.observe(el);
     return () => ro.disconnect();
   }, [rowKey]);
+  const distValue = hole.yardage ? `${displayDistance(hole.yardage, distanceUnit)}${unitLabel}` : null;
+  const distLabel = "Dist";
+  const DIST_GAP = 4; // px, at scale 1 — an explicit flex gap rather than a trailing space in
+  // distLabel, since a trailing space inside a flex-item <span> isn't reliably preserved (it
+  // rendered as no gap at all in testing); baked into naturalWidth below so the fit still lands
+  // on the row's real width instead of running a few px over once the gap is added back in.
+  const scale = useMemo(() => {
+    if (!rowWidth || !distValue) return 1;
+    const naturalWidth = measureTextWidth(distLabel, `12px ${sans}`) + DIST_GAP + measureTextWidth(distValue, `700 16px ${sans}`);
+    if (!naturalWidth) return 1;
+    return Math.min(2.2, Math.max(0.55, (rowWidth / naturalWidth) * 0.99));
+  }, [rowWidth, distValue]);
   return (
     <div style={{ minWidth: 0 }}>
       <div ref={rowRef} style={{ display: "flex", alignItems: "stretch", gap: 12 }}>
@@ -3353,9 +3378,10 @@ function HoleDataCluster({ hole, distanceUnit, unitLabel }) {
           {hole.strokeIndex ? <div>SI <b style={{ color: C.ink, fontSize: 14 }}>{hole.strokeIndex}</b></div> : null}
         </div>
       </div>
-      {hole.yardage ? (
-        <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, textAlign: "center", marginTop: 3, width: rowWidth ?? undefined }}>
-          Dist <b style={{ color: C.ink, fontSize: 16 }}>{displayDistance(hole.yardage, distanceUnit)}{unitLabel}</b>
+      {distValue ? (
+        <div style={{ display: "flex", justifyContent: "center", alignItems: "baseline", marginTop: 3, gap: DIST_GAP * scale, whiteSpace: "nowrap" }}>
+          <span style={{ fontFamily: sans, fontSize: 12 * scale, color: C.turf }}>{distLabel}</span>
+          <b style={{ fontFamily: sans, fontSize: 16 * scale, color: C.ink }}>{distValue}</b>
         </div>
       ) : null}
     </div>
