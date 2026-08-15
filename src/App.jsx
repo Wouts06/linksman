@@ -1517,20 +1517,31 @@ function GreenViewModal({ hole, fromLat, fromLon, distanceUnit, onClose }) {
           )}
           <div style={{ height: "100%", width: "100%", transform: cssRotateDeg ? `rotate(${cssRotateDeg}deg)` : undefined }}>
             {hasPolygon ? (
-              <MapContainer bounds={bounds} boundsOptions={{ padding: [24, 24] }} style={{ height: "100%", width: "100%" }}>
+              <MapContainer
+                bounds={bounds}
+                boundsOptions={{ padding: [10, 10] }}
+                maxZoom={22}
+                zoomSnap={0.1}
+                zoomDelta={0.1}
+                style={{ height: "100%", width: "100%" }}
+              >
                 <TileLayer
                   url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
                   attribution="Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community"
+                  maxNativeZoom={19}
+                  maxZoom={22}
                 />
                 <Polygon positions={hole.greenPolygon.map((p) => [p.lat, p.lon])} pathOptions={{ color: C.white, weight: 2, fillColor: C.turf, fillOpacity: 0.35 }} />
                 {greenLat != null && <Marker position={[greenLat, greenLon]} icon={greenIcon} />}
                 <RotationDragLock rotateDeg={cssRotateDeg} />
               </MapContainer>
             ) : (
-              <MapContainer center={[greenLat, greenLon]} zoom={19} style={{ height: "100%", width: "100%" }}>
+              <MapContainer center={[greenLat, greenLon]} zoom={20} maxZoom={22} style={{ height: "100%", width: "100%" }}>
                 <TileLayer
                   url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
                   attribution="Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community"
+                  maxNativeZoom={19}
+                  maxZoom={22}
                 />
                 <Marker position={[greenLat, greenLon]} icon={greenIcon} />
                 <RotationDragLock rotateDeg={cssRotateDeg} />
