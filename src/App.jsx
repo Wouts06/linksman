@@ -3338,12 +3338,20 @@ function BetterBallFocusedHole({
           </div>
         </div>
         <div style={{ textAlign: "right", fontFamily: sans, fontSize: 12, color: C.turf, flexShrink: 0 }}>
-          {hole.yardage ? <div>{displayDistance(hole.yardage, distanceUnit)}{unitLabel}</div> : null}
-          {liveYards != null && (
+          {hole.greenPolygon?.length > 0 && (
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} />
+            </div>
+          )}
+          {(hole.yardage || liveYards != null) && (
             <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end", marginTop: 2 }}>
-              {hole.greenPolygon?.length > 0 && <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} />}
-              <div style={{ color: C.fairway, fontWeight: 700 }}>📍 {Math.round(displayDistance(liveYards, distanceUnit))}{unitLabel}</div>
-              <RangefinderNote playsAsYards={rangefinder.playsAsYards} distanceUnit={distanceUnit} />
+              {hole.yardage ? <div>{displayDistance(hole.yardage, distanceUnit)}{unitLabel}</div> : null}
+              {liveYards != null && (
+                <>
+                  <div style={{ color: C.fairway, fontWeight: 700 }}>📍 {Math.round(displayDistance(liveYards, distanceUnit))}{unitLabel}</div>
+                  <RangefinderNote playsAsYards={rangefinder.playsAsYards} distanceUnit={distanceUnit} />
+                </>
+              )}
             </div>
           )}
           {hole.greenLat != null && (
@@ -3450,12 +3458,20 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
           </div>
         </div>
         <div style={{ textAlign: "right", fontFamily: sans, fontSize: 12, color: C.turf, flexShrink: 0 }}>
-          {hole.yardage ? <div>{displayDistance(hole.yardage, distanceUnit)}{unitLabel}</div> : null}
-          {liveYards != null && (
+          {hole.greenPolygon?.length > 0 && (
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} />
+            </div>
+          )}
+          {(hole.yardage || liveYards != null) && (
             <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end", marginTop: 2 }}>
-              {hole.greenPolygon?.length > 0 && <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} />}
-              <div style={{ color: C.fairway, fontWeight: 700 }}>📍 {Math.round(displayDistance(liveYards, distanceUnit))}{unitLabel}</div>
-              <RangefinderNote playsAsYards={rangefinder.playsAsYards} distanceUnit={distanceUnit} />
+              {hole.yardage ? <div>{displayDistance(hole.yardage, distanceUnit)}{unitLabel}</div> : null}
+              {liveYards != null && (
+                <>
+                  <div style={{ color: C.fairway, fontWeight: 700 }}>📍 {Math.round(displayDistance(liveYards, distanceUnit))}{unitLabel}</div>
+                  <RangefinderNote playsAsYards={rangefinder.playsAsYards} distanceUnit={distanceUnit} />
+                </>
+              )}
             </div>
           )}
           {suggestion && <div style={{ color: C.fairway }}>🎒 {suggestion}</div>}
