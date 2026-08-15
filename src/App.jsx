@@ -1027,16 +1027,20 @@ function greenAimPoint(fromLat, fromLon, hole, target = "back") {
    every other reading immediately. Callers gate this on hole.greenPolygon existing — with no
    polygon, front and back resolve to the same point (see greenAimPoint), so showing a toggle
    that changes nothing would just be confusing. */
-function GreenTargetToggle({ value, onChange }) {
+/* `width` (19 Aug) is optional — when passed (the two hole-header call sites, so the toggle
+   matches the "View green" button's width below it) the wrapper gets a fixed border-box width
+   and its two segments switch to flex:1 to split it evenly; left undefined (DriveMapModal) it
+   keeps its original content-hugging size. */
+function GreenTargetToggle({ value, onChange, width }) {
   return (
-    <div onClick={(e) => e.stopPropagation()} style={{ display: "inline-flex", border: `1px solid ${C.line}`, borderRadius: 5, overflow: "hidden", flexShrink: 0 }}>
+    <div onClick={(e) => e.stopPropagation()} style={{ display: "inline-flex", border: `1px solid ${C.line}`, borderRadius: 5, overflow: "hidden", flexShrink: 0, ...(width ? { width, boxSizing: "border-box" } : {}) }}>
       {["front", "back"].map((opt) => (
         <button
           key={opt}
           onClick={() => onChange(opt)}
           style={{
             fontSize: 11.5, fontFamily: sans, fontWeight: 700, padding: "4px 9px", cursor: "pointer",
-            border: "none", textTransform: "capitalize",
+            border: "none", textTransform: "capitalize", textAlign: "center", flex: width ? 1 : undefined,
             background: value === opt ? C.fairway : C.white,
             color: value === opt ? C.white : C.turf,
           }}
@@ -3327,25 +3331,34 @@ function BetterBallFocusedHole({
   return (
     <div style={{ padding: 12, background: C.white }}>
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 10, gap: 8 }}>
-        <div style={{ display: "flex", alignItems: "stretch", gap: 12, minWidth: 0 }}>
-          <div style={{ fontFamily: serif, fontSize: 36, color: C.fairway, lineHeight: 1 }}>{hole.number}</div>
-          {/* stretched to the same height as the hole number (16 Aug fix) — Par/SI used to sit on
-              its text baseline via alignItems: "baseline", which visually left them floating low
-              relative to the big number instead of evenly spanning its height. Static yardage
-              (19 Aug) moved down here from the right-hand column, next to Par/SI — it's fixed
-              per-hole data, not something that belongs beside the GPS-driven live distance, whose
-              width changes as position updates arrive and was making that side of the header
-              visibly shift during play. */}
-          <div style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", fontFamily: sans, fontSize: 12, color: C.turf, lineHeight: 1.2 }}>
-            <div>Par <b style={{ color: C.ink, fontSize: 14 }}>{hole.par}</b></div>
-            {hole.strokeIndex ? <div>SI <b style={{ color: C.ink, fontSize: 14 }}>{hole.strokeIndex}</b></div> : null}
-            {hole.yardage ? <div>Dist <b style={{ color: C.ink, fontSize: 16 }}>{displayDistance(hole.yardage, distanceUnit)}{unitLabel}</b></div> : null}
+        <div style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "stretch", gap: 12 }}>
+            <div style={{ fontFamily: serif, fontSize: 36, color: C.fairway, lineHeight: 1 }}>{hole.number}</div>
+            {/* stretched to the same height as the hole number (16 Aug fix) — Par/SI used to sit on
+                its text baseline via alignItems: "baseline", which visually left them floating low
+                relative to the big number instead of evenly spanning its height. */}
+            <div style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", fontFamily: sans, fontSize: 12, color: C.turf, lineHeight: 1.2 }}>
+              <div>Par <b style={{ color: C.ink, fontSize: 14 }}>{hole.par}</b></div>
+              {hole.strokeIndex ? <div>SI <b style={{ color: C.ink, fontSize: 14 }}>{hole.strokeIndex}</b></div> : null}
+            </div>
           </div>
+          {/* static yardage (19 Aug, widened 19 Aug) — its own full-width row underneath the
+              hole number + Par/SI row rather than squeezed into the narrow Par/SI column, since
+              this outer flex column stretches (the default cross-axis behavior) each row to the
+              width of the widest one, i.e. the number+Par/SI row above it. Deliberately kept off
+              the right-hand column: it's fixed per-hole data, not something that belongs beside
+              the GPS-driven live distance, whose width changes as position updates arrive and was
+              making that side of the header visibly shift during play. */}
+          {hole.yardage ? (
+            <div style={{ fontFamily: sans, fontSize: 12, color: C.turf }}>
+              Dist <b style={{ color: C.ink, fontSize: 16 }}>{displayDistance(hole.yardage, distanceUnit)}{unitLabel}</b>
+            </div>
+          ) : null}
         </div>
         <div style={{ textAlign: "right", fontFamily: sans, fontSize: 12, color: C.turf, flexShrink: 0 }}>
           {hole.greenPolygon?.length > 0 && (
             <div style={{ display: "flex", justifyContent: "flex-end" }}>
-              <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} />
+              <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} width={132} />
             </div>
           )}
           {liveYards != null && (
@@ -3355,7 +3368,7 @@ function BetterBallFocusedHole({
             </div>
           )}
           {hole.greenLat != null && (
-            <button style={{ ...btnGhost, fontSize: 12.5, padding: "5px 10px", marginTop: 4 }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
+            <button style={{ ...btnGhost, fontSize: 12.5, padding: "5px 10px", marginTop: 4, width: 132, boxSizing: "border-box" }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
           )}
         </div>
       </div>
@@ -3447,25 +3460,34 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
   return (
     <div style={{ padding: 12, background: C.white }}>
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 10, gap: 8 }}>
-        <div style={{ display: "flex", alignItems: "stretch", gap: 12, minWidth: 0 }}>
-          <div style={{ fontFamily: serif, fontSize: 36, color: C.fairway, lineHeight: 1 }}>{hole.number}</div>
-          {/* stretched to the same height as the hole number (16 Aug fix) — Par/SI used to sit on
-              its text baseline via alignItems: "baseline", which visually left them floating low
-              relative to the big number instead of evenly spanning its height. Static yardage
-              (19 Aug) moved down here from the right-hand column, next to Par/SI — it's fixed
-              per-hole data, not something that belongs beside the GPS-driven live distance, whose
-              width changes as position updates arrive and was making that side of the header
-              visibly shift during play. */}
-          <div style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", fontFamily: sans, fontSize: 12, color: C.turf, lineHeight: 1.2 }}>
-            <div>Par <b style={{ color: C.ink, fontSize: 14 }}>{hole.par}</b></div>
-            {hole.strokeIndex ? <div>SI <b style={{ color: C.ink, fontSize: 14 }}>{hole.strokeIndex}</b></div> : null}
-            {hole.yardage ? <div>Dist <b style={{ color: C.ink, fontSize: 16 }}>{displayDistance(hole.yardage, distanceUnit)}{unitLabel}</b></div> : null}
+        <div style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "stretch", gap: 12 }}>
+            <div style={{ fontFamily: serif, fontSize: 36, color: C.fairway, lineHeight: 1 }}>{hole.number}</div>
+            {/* stretched to the same height as the hole number (16 Aug fix) — Par/SI used to sit on
+                its text baseline via alignItems: "baseline", which visually left them floating low
+                relative to the big number instead of evenly spanning its height. */}
+            <div style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", fontFamily: sans, fontSize: 12, color: C.turf, lineHeight: 1.2 }}>
+              <div>Par <b style={{ color: C.ink, fontSize: 14 }}>{hole.par}</b></div>
+              {hole.strokeIndex ? <div>SI <b style={{ color: C.ink, fontSize: 14 }}>{hole.strokeIndex}</b></div> : null}
+            </div>
           </div>
+          {/* static yardage (19 Aug, widened 19 Aug) — its own full-width row underneath the
+              hole number + Par/SI row rather than squeezed into the narrow Par/SI column, since
+              this outer flex column stretches (the default cross-axis behavior) each row to the
+              width of the widest one, i.e. the number+Par/SI row above it. Deliberately kept off
+              the right-hand column: it's fixed per-hole data, not something that belongs beside
+              the GPS-driven live distance, whose width changes as position updates arrive and was
+              making that side of the header visibly shift during play. */}
+          {hole.yardage ? (
+            <div style={{ fontFamily: sans, fontSize: 12, color: C.turf }}>
+              Dist <b style={{ color: C.ink, fontSize: 16 }}>{displayDistance(hole.yardage, distanceUnit)}{unitLabel}</b>
+            </div>
+          ) : null}
         </div>
         <div style={{ textAlign: "right", fontFamily: sans, fontSize: 12, color: C.turf, flexShrink: 0 }}>
           {hole.greenPolygon?.length > 0 && (
             <div style={{ display: "flex", justifyContent: "flex-end" }}>
-              <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} />
+              <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} width={132} />
             </div>
           )}
           {liveYards != null && (
@@ -3476,7 +3498,7 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
           )}
           {suggestion && <div style={{ color: C.fairway }}>🎒 {suggestion}</div>}
           {hole.greenLat != null && (
-            <button style={{ ...btnGhost, fontSize: 12.5, padding: "5px 10px", marginTop: 4 }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
+            <button style={{ ...btnGhost, fontSize: 12.5, padding: "5px 10px", marginTop: 4, width: 132, boxSizing: "border-box" }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
           )}
         </div>
       </div>
