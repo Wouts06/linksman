@@ -1027,20 +1027,24 @@ function greenAimPoint(fromLat, fromLon, hole, target = "back") {
    every other reading immediately. Callers gate this on hole.greenPolygon existing — with no
    polygon, front and back resolve to the same point (see greenAimPoint), so showing a toggle
    that changes nothing would just be confusing. */
-/* `width` (19 Aug) is optional — when passed (the two hole-header call sites, so the toggle
-   matches the "View green" button's width below it) the wrapper gets a fixed border-box width
-   and its two segments switch to flex:1 to split it evenly; left undefined (DriveMapModal) it
-   keeps its original content-hugging size. */
-function GreenTargetToggle({ value, onChange, width }) {
+/* `width`/`height` (19 Aug) are optional — when passed (the two hole-header call sites, so the
+   toggle matches the "View green" button below it exactly) the wrapper gets a fixed border-box
+   size, its two segments switch to flex:1 to split the width evenly, and their padding switches
+   to flex-centering so the (fixed) height doesn't just get eaten by the original vertical
+   padding; left undefined (DriveMapModal) it keeps its original content-hugging size. */
+function GreenTargetToggle({ value, onChange, width, height }) {
+  const fixed = width != null || height != null;
   return (
-    <div onClick={(e) => e.stopPropagation()} style={{ display: "inline-flex", border: `1px solid ${C.line}`, borderRadius: 5, overflow: "hidden", flexShrink: 0, ...(width ? { width, boxSizing: "border-box" } : {}) }}>
+    <div onClick={(e) => e.stopPropagation()} style={{ display: "inline-flex", border: `1px solid ${C.line}`, borderRadius: 5, overflow: "hidden", flexShrink: 0, boxSizing: "border-box", ...(width ? { width } : {}), ...(height ? { height } : {}) }}>
       {["front", "back"].map((opt) => (
         <button
           key={opt}
           onClick={() => onChange(opt)}
           style={{
-            fontSize: 11.5, fontFamily: sans, fontWeight: 700, padding: "4px 9px", cursor: "pointer",
-            border: "none", textTransform: "capitalize", textAlign: "center", flex: width ? 1 : undefined,
+            fontSize: 11.5, fontFamily: sans, fontWeight: 700, cursor: "pointer",
+            border: "none", textTransform: "capitalize", textAlign: "center",
+            padding: fixed ? "0 9px" : "4px 9px", flex: width ? 1 : undefined,
+            display: fixed ? "flex" : undefined, alignItems: fixed ? "center" : undefined, justifyContent: fixed ? "center" : undefined,
             background: value === opt ? C.fairway : C.white,
             color: value === opt ? C.white : C.turf,
           }}
@@ -3350,15 +3354,15 @@ function BetterBallFocusedHole({
               the GPS-driven live distance, whose width changes as position updates arrive and was
               making that side of the header visibly shift during play. */}
           {hole.yardage ? (
-            <div style={{ fontFamily: sans, fontSize: 12, color: C.turf }}>
+            <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, textAlign: "center" }}>
               Dist <b style={{ color: C.ink, fontSize: 16 }}>{displayDistance(hole.yardage, distanceUnit)}{unitLabel}</b>
             </div>
           ) : null}
         </div>
         <div style={{ textAlign: "right", fontFamily: sans, fontSize: 12, color: C.turf, flexShrink: 0 }}>
           {hole.greenPolygon?.length > 0 && (
-            <div style={{ display: "flex", justifyContent: "flex-end" }}>
-              <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} width={132} />
+            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 6 }}>
+              <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} width={132} height={30} />
             </div>
           )}
           {liveYards != null && (
@@ -3368,7 +3372,7 @@ function BetterBallFocusedHole({
             </div>
           )}
           {hole.greenLat != null && (
-            <button style={{ ...btnGhost, fontSize: 12.5, padding: "5px 10px", marginTop: 4, width: 132, boxSizing: "border-box" }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
+            <button style={{ ...btnGhost, fontSize: 12.5, padding: "0 10px", marginTop: 4, width: 132, height: 30, boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
           )}
         </div>
       </div>
@@ -3479,15 +3483,15 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
               the GPS-driven live distance, whose width changes as position updates arrive and was
               making that side of the header visibly shift during play. */}
           {hole.yardage ? (
-            <div style={{ fontFamily: sans, fontSize: 12, color: C.turf }}>
+            <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, textAlign: "center" }}>
               Dist <b style={{ color: C.ink, fontSize: 16 }}>{displayDistance(hole.yardage, distanceUnit)}{unitLabel}</b>
             </div>
           ) : null}
         </div>
         <div style={{ textAlign: "right", fontFamily: sans, fontSize: 12, color: C.turf, flexShrink: 0 }}>
           {hole.greenPolygon?.length > 0 && (
-            <div style={{ display: "flex", justifyContent: "flex-end" }}>
-              <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} width={132} />
+            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 6 }}>
+              <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} width={132} height={30} />
             </div>
           )}
           {liveYards != null && (
@@ -3498,7 +3502,7 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
           )}
           {suggestion && <div style={{ color: C.fairway }}>🎒 {suggestion}</div>}
           {hole.greenLat != null && (
-            <button style={{ ...btnGhost, fontSize: 12.5, padding: "5px 10px", marginTop: 4, width: 132, boxSizing: "border-box" }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
+            <button style={{ ...btnGhost, fontSize: 12.5, padding: "0 10px", marginTop: 4, width: 132, height: 30, boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
           )}
         </div>
       </div>
