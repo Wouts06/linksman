@@ -607,6 +607,77 @@ function useWindData(lat, lon, unit) {
   return state;
 }
 
+/* ---------- rangefinder: elevation-adjusted "plays as" distance ---------- */
+/* 16 Aug — opt-in per round (see PlayTab's "🎯 Rangefinder" setup toggle). Uses point elevation,
+   via our own /api/elevation proxy (see api/elevation.js), at the golfer's current position and
+   the green to estimate whether a shot plays longer or shorter than the flat GPS distance —
+   golfers' common rule of thumb is roughly +1 yard of "effective" distance per foot of elevation
+   gain, -1 yard per foot of drop (a simplification, not real ballistics, but the same
+   approximation this feature was explicitly scoped around).
+   Two different caching/throttling rules for the two points being compared, since one is static
+   for the whole hole and the other moves continuously as GPS updates:
+   - the green's elevation doesn't change for a given hole — fetched once per hole (cached in a
+     ref keyed by holeKey) and reused for every later recalculation on that same hole.
+   - the golfer's own position elevation is refetched as they walk, but throttled to at most once
+     every RANGEFINDER_REFETCH_MS *and* only once they've moved at least
+     RANGEFINDER_REFETCH_MIN_YARDS since the last fetch — elevation along a single fairway barely
+     changes shot to shot, and OpenTopoData's free public tier caps out at 1000 requests/day, so
+     there's real reason not to hit it on every GPS tick (which can arrive every few seconds). */
+const RANGEFINDER_REFETCH_MS = 30000;
+const RANGEFINDER_REFETCH_MIN_YARDS = 15;
+const METERS_TO_FEET = 3.28084;
+function useRangefinder(enabled, holeKey, fromLat, fromLon, toLat, toLon, distanceYards) {
+  const [state, setState] = useState({ playsAsYards: null, elevDeltaFt: null, error: null });
+  const greenElevCache = useRef({}); // { [holeKey]: elevationMeters }
+  const lastFromFetchRef = useRef(null); // { lat, lon, elevationMeters, atMs }
+
+  useEffect(() => {
+    if (!enabled || fromLat == null || fromLon == null || toLat == null || toLon == null || distanceYards == null) {
+      setState({ playsAsYards: null, elevDeltaFt: null, error: null });
+      return;
+    }
+    let cancelled = false;
+
+    async function load() {
+      try {
+        const needGreen = greenElevCache.current[holeKey] == null;
+        const last = lastFromFetchRef.current;
+        const movedYards = last ? haversineYards(fromLat, fromLon, last.lat, last.lon) : Infinity;
+        const elapsedMs = last ? Date.now() - last.atMs : Infinity;
+        const needFrom = !last || movedYards >= RANGEFINDER_REFETCH_MIN_YARDS || elapsedMs >= RANGEFINDER_REFETCH_MS;
+        if (!needGreen && !needFrom) return; // nothing stale enough to refresh yet
+
+        const pairs = [];
+        if (needFrom) pairs.push(`${fromLat},${fromLon}`);
+        if (needGreen) pairs.push(`${toLat},${toLon}`);
+        const url = `/api/elevation?locations=${encodeURIComponent(pairs.join("|"))}`;
+        const res = await fetchWithTimeout(url, { headers: { Accept: "application/json" } }, 10000);
+        if (!res.ok) throw new Error("Elevation lookup failed");
+        const data = await res.json();
+        const results = data.results || [];
+        let idx = 0;
+        let fromElevM = last?.elevationMeters ?? null;
+        if (needFrom) { fromElevM = results[idx]?.elevation ?? null; idx++; }
+        let toElevM = greenElevCache.current[holeKey] ?? null;
+        if (needGreen) { toElevM = results[idx]?.elevation ?? null; idx++; }
+
+        if (needFrom && fromElevM != null) lastFromFetchRef.current = { lat: fromLat, lon: fromLon, elevationMeters: fromElevM, atMs: Date.now() };
+        if (needGreen && toElevM != null) greenElevCache.current[holeKey] = toElevM;
+
+        if (cancelled || fromElevM == null || toElevM == null) return;
+        const deltaFt = (toElevM - fromElevM) * METERS_TO_FEET;
+        setState({ playsAsYards: Math.round(distanceYards + deltaFt), elevDeltaFt: Math.round(deltaFt), error: null });
+      } catch {
+        if (!cancelled) setState((s) => ({ ...s, error: "elevation unavailable" }));
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, [enabled, holeKey, fromLat, fromLon, toLat, toLon, distanceYards]);
+
+  return state;
+}
+
 /* compass-rose dial: rotates the whole face (N/E/S/W ticks + wind arrow together) by
    -deviceHeading so it stays locked to the real world as the phone turns, the same way a
    physical compass does — a fixed triangle at the top marks "the way your phone is pointing."
@@ -974,6 +1045,22 @@ function GreenTargetToggle({ value, onChange }) {
         </button>
       ))}
     </div>
+  );
+}
+
+/* small shared renderer for the rangefinder's elevation-adjusted "plays as" note (16 Aug) —
+   appended next to an existing live-distance readout wherever the rangefinder is enabled for the
+   round and elevation data has resolved for the current position. Renders nothing while
+   loading/unresolved/unavailable, matching the wind indicator's silent-fail pattern (an optional
+   enhancement failing quietly rather than showing a stale or error placeholder next to a real,
+   already-useful GPS distance). */
+function RangefinderNote({ playsAsYards, distanceUnit }) {
+  if (playsAsYards == null) return null;
+  const unitLabel = distanceUnit === "m" ? "m" : "y";
+  return (
+    <span style={{ color: C.flag, fontWeight: 700, marginLeft: 4, whiteSpace: "nowrap" }}>
+      (plays {Math.round(displayDistance(playsAsYards, distanceUnit))}{unitLabel})
+    </span>
   );
 }
 
@@ -2945,7 +3032,7 @@ function PenaltyBadgeButton({ value, onClick, label = "+ Penalty" }) {
   );
 }
 
-function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, playerBName, playerAId, playerBId, state, onUpdate, onMarkDrive, onMarkShot, livePos, distanceUnit, mePlayerId, meBag, course, teeAssign, greenTarget = "back" }) {
+function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, playerBName, playerAId, playerBId, state, onUpdate, onMarkDrive, onMarkShot, livePos, distanceUnit, mePlayerId, meBag, course, teeAssign, greenTarget = "back", rangefinderPlaysAsYards }) {
   const s = state || defaultBBHole();
   const [puttPickerFor, setPuttPickerFor] = useState(null); // null | "A" | "B"
   const [penaltyTarget, setPenaltyTarget] = useState(null); // null | { roundIdx, who: "A"|"B"|null }
@@ -3014,6 +3101,7 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
       {remainingYards != null && (
         <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, marginBottom: 6 }}>
           📍 {Math.round(displayDistance(remainingYards, distanceUnit))}{distanceUnit === "m" ? "m" : "y"} to green (live)
+          <RangefinderNote playsAsYards={rangefinderPlaysAsYards} distanceUnit={distanceUnit} />
           {topSuggestion && <span style={{ color: C.fairway, fontWeight: 700, marginLeft: 6 }}>🎒 {topSuggestion}</span>}
         </div>
       )}
@@ -3226,12 +3314,16 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
    BetterBallHoleCard(s) side by side underneath, plus the same Next/Finish hole button. */
 function BetterBallFocusedHole({
   hole, isLast, solo, pA1, pB1, pA2, pB2, team1Ids, team2Ids, bbState, distanceUnit, livePos,
-  mePlayerId, mePlayer, course, teeAssign, greenTarget = "back", onSetGreenTarget, onUpdateTeam1, onUpdateTeam2, onMarkDrive1, onMarkShot1, onMarkDrive2, onMarkShot2, onNext,
+  mePlayerId, mePlayer, course, teeAssign, greenTarget = "back", rangefinderEnabled, onSetGreenTarget, onUpdateTeam1, onUpdateTeam2, onMarkDrive1, onMarkShot1, onMarkDrive2, onMarkShot2, onNext,
 }) {
   const [showGreenView, setShowGreenView] = useState(false);
   const aimGreen = livePos ? greenAimPoint(livePos.lat, livePos.lon, hole, greenTarget) : null;
   const liveYards = aimGreen && livePos ? haversineYards(livePos.lat, livePos.lon, aimGreen.lat, aimGreen.lon) : null;
   const unitLabel = distanceUnit === "m" ? "m" : "y";
+  /* computed once here (not per-team-card) since both teams share the same golfer's live position
+     and the same green-target point — duplicating the fetch per card would double up on
+     OpenTopoData's low daily request quota for an identical result. */
+  const rangefinder = useRangefinder(rangefinderEnabled, `${course?.id || "c"}-${hole.number}`, livePos?.lat, livePos?.lon, aimGreen?.lat, aimGreen?.lon, liveYards);
   return (
     <div style={{ padding: 12, background: C.white }}>
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 10, gap: 8 }}>
@@ -3251,6 +3343,7 @@ function BetterBallFocusedHole({
             <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end", marginTop: 2 }}>
               {hole.greenPolygon?.length > 0 && <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} />}
               <div style={{ color: C.fairway, fontWeight: 700 }}>📍 {Math.round(displayDistance(liveYards, distanceUnit))}{unitLabel}</div>
+              <RangefinderNote playsAsYards={rangefinder.playsAsYards} distanceUnit={distanceUnit} />
             </div>
           )}
           {hole.greenLat != null && (
@@ -3275,14 +3368,14 @@ function BetterBallFocusedHole({
           state={bbState.team1?.[hole.number]} onUpdate={onUpdateTeam1}
           onMarkDrive={onMarkDrive1} onMarkShot={onMarkShot1}
           livePos={livePos} distanceUnit={distanceUnit} mePlayerId={mePlayerId} meBag={mePlayer?.bag}
-          course={course} teeAssign={teeAssign} greenTarget={greenTarget} />
+          course={course} teeAssign={teeAssign} greenTarget={greenTarget} rangefinderPlaysAsYards={rangefinder.playsAsYards} />
         {!solo && (
           <BetterBallHoleCard hole={hole} teamKey="team2" teamColor={C.team2} teamLabel="Team 2" playerAName={pA2?.name || "A"} playerBName={pB2?.name || "B"}
             playerAId={team2Ids[0]} playerBId={team2Ids[1]}
             state={bbState.team2?.[hole.number]} onUpdate={onUpdateTeam2}
             onMarkDrive={onMarkDrive2} onMarkShot={onMarkShot2}
             livePos={livePos} distanceUnit={distanceUnit} mePlayerId={mePlayerId} meBag={mePlayer?.bag}
-            course={course} teeAssign={teeAssign} greenTarget={greenTarget} />
+            course={course} teeAssign={teeAssign} greenTarget={greenTarget} rangefinderPlaysAsYards={rangefinder.playsAsYards} />
         )}
       </div>
 
@@ -3296,12 +3389,13 @@ function BetterBallFocusedHole({
 /* single "focused" hole in the per-hole stroke-play scoring view — occupies most of the
    screen while active; one compact card per selected player inside it. Direction/putts and
    shot-marking sit side by side as equal-width flex columns so neither overflows the card. */
-function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit, livePos, mePlayer, course, teeAssign, greenTarget = "back", onSetGreenTarget, onScoreField, onMarkDrive, onMarkNextShot, onNext }) {
+function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit, livePos, mePlayer, course, teeAssign, greenTarget = "back", rangefinderEnabled, onSetGreenTarget, onScoreField, onMarkDrive, onMarkNextShot, onNext }) {
   const [puttPickerForPid, setPuttPickerForPid] = useState(null); // 15 Aug — same tap-only picker as Better Ball, applied here too
   const [penaltyTarget, setPenaltyTarget] = useState(null); // null | { pid, kind: "drive" } | { pid, kind: "extra", idx }
   const [showGreenView, setShowGreenView] = useState(false);
   const aimGreen = livePos ? greenAimPoint(livePos.lat, livePos.lon, hole, greenTarget) : null;
   const liveYards = aimGreen && livePos ? haversineYards(livePos.lat, livePos.lon, aimGreen.lat, aimGreen.lon) : null;
+  const rangefinder = useRangefinder(rangefinderEnabled, `${course?.id || "c"}-${hole.number}`, livePos?.lat, livePos?.lon, aimGreen?.lat, aimGreen?.lon, liveYards);
   /* Driver only makes sense as a tee-shot suggestion (16 Aug) — once mePlayer's own drive is
      already marked (or they've already got an extra/approach shot logged) for this hole, this
      header suggestion is for shot 2+, so Driver is dropped from consideration. */
@@ -3361,6 +3455,7 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
             <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end", marginTop: 2 }}>
               {hole.greenPolygon?.length > 0 && <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} />}
               <div style={{ color: C.fairway, fontWeight: 700 }}>📍 {Math.round(displayDistance(liveYards, distanceUnit))}{unitLabel}</div>
+              <RangefinderNote playsAsYards={rangefinder.playsAsYards} distanceUnit={distanceUnit} />
             </div>
           )}
           {suggestion && <div style={{ color: C.fairway }}>🎒 {suggestion}</div>}
@@ -3541,6 +3636,19 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
      DriveMapModal) — see greenAimPoint/GreenTargetToggle. Defaults to "back", matching the
      back-edge feature's original (pre-toggle) behavior. */
   const [greenTarget, setGreenTarget] = useState(savedRound?.greenTarget || "back");
+  /* rangefinder (16 Aug) — opt-in per round, chosen on the setup screen (see the "🎯 Rangefinder"
+     toggle below). savedRound's own value takes priority when resuming an in-progress round;
+     otherwise defaults to whatever was chosen last time (remembered in its own small localStorage
+     key, "golf:rangefinderDefault" — read once at mount, same pattern as savedRound itself), so a
+     player who wants it every round doesn't have to re-enable it each time, without this being a
+     full app-wide setting threaded through App() like distanceUnit/voiceWakeWord. */
+  const [rangefinderEnabled, setRangefinderEnabledState] = useState(
+    savedRound?.rangefinderEnabled ?? loadKey("golf:rangefinderDefault", false)
+  );
+  const setRangefinderEnabled = useCallback((v) => {
+    setRangefinderEnabledState(v);
+    saveKey("golf:rangefinderDefault", v);
+  }, []);
   const [bbState, setBbState] = useState(savedRound?.bbState || { team1: {}, team2: {} });
   const [startHole, setStartHole] = useState(savedRound?.startHole || 1);
   const [activeIdx, setActiveIdx] = useState(savedRound?.activeIdx ?? 0);
@@ -3618,8 +3726,8 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
      lose it — only while actively scoring; the setup screen and finished rounds don't persist */
   useEffect(() => {
     if (step !== "scoring") return;
-    saveKey(ACTIVE_ROUND_KEY, { format, courseId, selected, overrides, scores, teamAssign, teeAssign, bbState, startHole, activeIdx, greenTarget });
-  }, [step, format, courseId, selected, overrides, scores, teamAssign, teeAssign, bbState, startHole, activeIdx, greenTarget]);
+    saveKey(ACTIVE_ROUND_KEY, { format, courseId, selected, overrides, scores, teamAssign, teeAssign, bbState, startHole, activeIdx, greenTarget, rangefinderEnabled });
+  }, [step, format, courseId, selected, overrides, scores, teamAssign, teeAssign, bbState, startHole, activeIdx, greenTarget, rangefinderEnabled]);
 
   /* tells App() whether a round is actively being scored right now, plus enough to render the
      ribbon's compact header (course name / format) and let its hamburger menu's "Back to
@@ -4087,6 +4195,15 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
           </>
         )}
 
+        <div style={{ fontFamily: sans, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: C.turf, margin: "14px 0 8px" }}>Rangefinder</div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
+          <button style={{ ...btnGhost, background: !rangefinderEnabled ? C.fairway : C.white, color: !rangefinderEnabled ? C.white : C.fairway }} onClick={() => setRangefinderEnabled(false)}>Off</button>
+          <button style={{ ...btnGhost, background: rangefinderEnabled ? C.fairway : C.white, color: rangefinderEnabled ? C.white : C.fairway }} onClick={() => setRangefinderEnabled(true)}>On</button>
+        </div>
+        <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, marginBottom: 16 }}>
+          When on, the live distance to the green also shows an elevation-adjusted "plays as" yardage — e.g. "150y (plays 156y)" for an uphill green — using terrain elevation at your position and the green.
+        </div>
+
         <div style={{ fontFamily: sans, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: C.turf, margin: "14px 0 8px" }}>
           Select {format === "betterball" ? "2 or 4" : "up to 4"} players
         </div>
@@ -4249,6 +4366,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
             course={course}
             teeAssign={teeAssign}
             greenTarget={greenTarget}
+            rangefinderEnabled={rangefinderEnabled}
             onSetGreenTarget={setGreenTarget}
             onScoreField={setScoreField}
             onMarkDrive={markDriveForStroke}
@@ -4449,6 +4567,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
           course={course}
           teeAssign={teeAssign}
           greenTarget={greenTarget}
+          rangefinderEnabled={rangefinderEnabled}
           onSetGreenTarget={setGreenTarget}
           onUpdateTeam1={(s) => updateBB("team1", h.number, s)}
           onUpdateTeam2={(s) => updateBB("team2", h.number, s)}
