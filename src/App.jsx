@@ -29,6 +29,11 @@ const C = {
   white: "#FBF9F2",
   team1: "#1E3A2B",
   team2: "#7A4A1E",
+  /* added 19 Aug for the round Stats drawer's "eagle" bar/tile — every other status color in
+     the palette was already spoken for (flag=over-par, turf/fairway=under-par/good), so eagles
+     (the rarest, best outcome) get their own accent rather than reusing brass or fairway and
+     losing the distinction from birdie/par. */
+  gold: "#C9A227",
 };
 const serif = 'Georgia, "Iowan Old Style", Cambria, "Times New Roman", serif';
 const mono = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
@@ -1239,6 +1244,41 @@ function strokesOnHole(ch, strokeIndex) {
   const extra = (ch % 18) >= strokeIndex ? 1 : 0;
   return Math.max(0, base + extra);
 }
+/* Stableford points for one hole (19 Aug, Stats drawer) — standard net-score table: par = 2,
+   birdie = 3, eagle = 4, ... bogey = 1, double-bogey-or-worse (net) = 0. `strokesReceived` is
+   this player's strokesOnHole(...) allowance for that hole. Returns null (not 0) when there's
+   no recorded score, so callers can tell "not played" apart from a genuine 0-point hole. */
+function stablefordPoints(gross, par, strokesReceived) {
+  if (gross == null || gross === "" || isNaN(gross)) return null;
+  const net = gross - strokesReceived;
+  return Math.max(0, 2 - (net - par));
+}
+/* Round-level Stableford total for one player, walking the same courseHoles + saved per-hole
+   cells every other round-detail stat uses. Returns null (not 0) if nothing's been scored yet. */
+function computeStablefordTotal(round, pid, courseHoles) {
+  const holes = round.scores[pid]?.holes || {};
+  const ch = round.scores[pid]?.courseHandicap ?? 0;
+  let total = 0, counted = 0;
+  courseHoles.forEach((h) => {
+    const cell = holes[h.number];
+    if (!cell || cell.gross === "" || cell.gross == null) return;
+    const pts = stablefordPoints(Number(cell.gross), h.par, strokesOnHole(ch, h.strokeIndex));
+    if (pts != null) { total += pts; counted += 1; }
+  });
+  return counted ? total : null;
+}
+/* WHS score differential for a completed round — the same formula finishStrokeRound uses when
+   it pushes a new differential onto player.differentials (see there), just recomputed here from
+   the saved round/tee data so the Stats drawer can show it without a separate stored field. */
+function computeScoreDifferential(round, pid, course) {
+  const s = round.scores[pid];
+  if (!s || s.gross == null || s.gross === "") return null;
+  const tee = teeById(course, s.teeId);
+  const rating = tee?.rating ?? course?.rating ?? round.par;
+  const slope = tee?.slope || 113;
+  if (rating == null) return null;
+  return Math.round((((s.gross - rating) * 113) / slope) * 10) / 10;
+}
 function parTotal(course) {
   return course.holes.reduce((s, h) => s + (Number(h.par) || 0), 0);
 }
@@ -1367,27 +1407,62 @@ function computeRoundStats(round, pid, courseHoles) {
   let firHit = 0, firAttempts = 0;
   let girHit = 0, girAttempts = 0;
   const shapeCounts = { left: 0, fairway: 0, right: 0 };
+  /* par-3 tee shots share the same `shape` field as par-4/5 drives, just with a wider option
+     set (left/green/right/long/short — see ShapeSelector) — this was already being recorded,
+     just never tallied up anywhere, so the Stats drawer's Par-3 donut (19 Aug) is real data
+     from day one, no new capture step needed. */
+  const par3ShapeCounts = { left: 0, green: 0, right: 0, long: 0, short: 0 };
+  /* putts-per-hole distribution for the Stats drawer's "Putts per hole" bar chart (19 Aug) —
+     buckets 4+ together since anything from there up reads the same on a bar chart and keeps
+     the row count fixed regardless of how bad a single hole got. */
+  const puttsDist = { 0: 0, 1: 0, 2: 0, 3: 0, "4+": 0 };
+  /* strokes-by-score-type distribution for the Stats drawer's "Strokes by hole" bar chart —
+     same diff-from-par bucketing ScoreBadge already uses for its border styling, just counted
+     instead of styled, and split into Dbl+/Worse (ScoreBadge only needed one "2 or worse" case). */
+  const strokesByType = { eagle: 0, birdie: 0, par: 0, bogey: 0, dbl: 0, worse: 0 };
+  let penaltyCount = 0;
   courseHoles.forEach((h) => {
     const cell = holes[h.number];
     if (!cell) return;
     const putts = Number(cell.putts);
-    if (cell.putts !== "" && cell.putts != null && !isNaN(putts)) { totalPutts += putts; puttsCount += 1; }
+    const hasPutts = cell.putts !== "" && cell.putts != null && !isNaN(putts);
+    if (hasPutts) {
+      totalPutts += putts; puttsCount += 1;
+      const bucket = putts >= 4 ? "4+" : String(putts);
+      if (puttsDist[bucket] != null) puttsDist[bucket] += 1;
+    }
     if (h.par !== 3 && cell.shape) {
       firAttempts += 1;
       if (cell.shape === "fairway") firHit += 1;
       shapeCounts[cell.shape] = (shapeCounts[cell.shape] || 0) + 1;
     }
+    if (h.par === 3 && cell.shape && par3ShapeCounts[cell.shape] != null) {
+      par3ShapeCounts[cell.shape] += 1;
+    }
     const gross = Number(cell.gross);
-    if (cell.gross !== "" && cell.gross != null && !isNaN(gross) && cell.putts !== "" && cell.putts != null && !isNaN(putts)) {
+    const hasGross = cell.gross !== "" && cell.gross != null && !isNaN(gross);
+    if (hasGross && hasPutts) {
       girAttempts += 1;
       if (gross - putts <= h.par - 2) girHit += 1;
     }
+    if (hasGross) {
+      const diff = gross - h.par;
+      if (diff <= -2) strokesByType.eagle += 1;
+      else if (diff === -1) strokesByType.birdie += 1;
+      else if (diff === 0) strokesByType.par += 1;
+      else if (diff === 1) strokesByType.bogey += 1;
+      else if (diff === 2) strokesByType.dbl += 1;
+      else strokesByType.worse += 1;
+    }
+    let n = cell.drivePenalty ? 1 : 0;
+    (cell.extraShots || []).forEach((es) => { if (es.penalty) n += 1; });
+    penaltyCount += n;
   });
   return {
-    totalPutts, puttsCount,
+    totalPutts, puttsCount, puttsDist,
     fir: firAttempts ? Math.round((100 * firHit) / firAttempts) : null, firHit, firAttempts,
     gir: girAttempts ? Math.round((100 * girHit) / girAttempts) : null, girHit, girAttempts,
-    shapeCounts,
+    shapeCounts, par3ShapeCounts, strokesByType, penaltyCount,
   };
 }
 const SHAPE_COLOR = { left: C.flag, right: C.brass, fairway: C.turf, green: C.turf, long: C.team2, short: C.turfLight };
@@ -4939,7 +5014,11 @@ function bbAdvancedStats(holeDetails, courseHoles) {
   return stats;
 }
 
-function RoundDetailStroke({ round, players, courseHoles, distanceUnit }) {
+function RoundDetailStroke({ round, players, course, courseHoles, distanceUnit }) {
+  /* holds the pid whose Stats drawer is open, null = closed — same "one nullable state var,
+     modal owns no visibility of its own" convention as PenaltyPickerModal/DriveMapModal use
+     elsewhere in this file (19 Aug, Stats drawer). */
+  const [statsFor, setStatsFor] = useState(null);
   return (
     <div style={{ display: "grid", gap: 16 }}>
       {round.playerIds.map((pid) => {
@@ -4963,7 +5042,18 @@ function RoundDetailStroke({ round, players, courseHoles, distanceUnit }) {
         }, 0);
         return (
           <div key={pid} style={{ border: `1px solid ${C.line}`, borderRadius: 8, padding: 12 }}>
-            <div style={{ fontFamily: serif, fontSize: 15, color: C.fairway, marginBottom: 8 }}>{player?.name || "?"}</div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div style={{ fontFamily: serif, fontSize: 15, color: C.fairway }}>{player?.name || "?"}</div>
+              <button
+                onClick={() => setStatsFor(pid)}
+                style={{
+                  display: "flex", alignItems: "center", gap: 6, background: C.fairway, color: C.white, border: "none",
+                  borderRadius: 6, padding: "6px 10px", fontFamily: sans, fontSize: 11.5, fontWeight: 700, letterSpacing: "0.02em", cursor: "pointer",
+                }}
+              >
+                📊 Stats
+              </button>
+            </div>
             <div style={{ overflowX: "auto" }}>
               <table style={{ borderCollapse: "collapse", fontFamily: mono, fontSize: 12, width: "100%" }}>
                 <thead><tr><th style={thStyle}>Hole</th><th style={thStyle}>Par</th><th style={thStyle}>Score</th><th style={thStyle}>Putts</th><th style={thStyle}>Drive</th><th style={thStyle}>Club</th><th style={thStyle}>Other shots</th></tr></thead>
@@ -5031,6 +5121,234 @@ function RoundDetailStroke({ round, players, courseHoles, distanceUnit }) {
           </div>
         );
       })}
+      {statsFor && (
+        <StrokeRoundStatsModal
+          round={round}
+          player={players.find((p) => p.id === statsFor)}
+          course={course}
+          courseHoles={courseHoles}
+          onClose={() => setStatsFor(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ---------- round Stats drawer (19 Aug) ----------
+   A per-player slide-up drawer for a completed stroke-play round: headline totals (incl. the
+   Stableford points/score-diff finally computed for real instead of just being talked about),
+   a strokes-by-hole and putts-per-hole distribution, GIR/FIR/penalties, and the two shot-shape
+   donuts (tee shots + par-3s) that were already being recorded via `shape` but never tallied
+   into anything visual before now. Deliberately its own drawer rather than folding into the
+   always-visible per-player card above — that card is a dense reference table you skim, this is
+   a "how did I actually play" summary you open on purpose. Mirrors the approved mockup
+   (linksman_stats_mockup.html) — own parchment/fairway-green look, not the reference screenshots
+   it was inspired by. Approach-shot direction (par 4/5) is intentionally left as a caveat, not a
+   chart: unlike tee shots and par-3s, there's no data captured for it yet (would need a new
+   "how'd the approach finish" step in the live-scoring flow) — out of scope for this round of
+   work, called out explicitly rather than faked with placeholder numbers. */
+const statsTileStyle = { background: C.white, border: `1px solid ${C.line}`, borderRadius: 8, padding: "10px 6px", textAlign: "center" };
+const statsMiniStatStyle = { background: C.white, border: `1px solid ${C.line}`, borderRadius: 8, padding: 12 };
+const statsSectionLabelStyle = { fontFamily: sans, fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.07em", color: C.turf, margin: "18px 0 10px" };
+const statsCaveatStyle = { fontFamily: sans, fontSize: 10.5, color: C.turf, lineHeight: 1.5, background: C.paper2, borderRadius: 6, padding: "8px 10px", marginBottom: 20 };
+
+function StatBarChart({ rows }) {
+  const max = Math.max(1, ...rows.map((r) => r.count));
+  return (
+    <div style={{ marginBottom: 24 }}>
+      {rows.map((r) => (
+        <div key={r.label} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 7 }}>
+          <div style={{ width: 56, flexShrink: 0, fontFamily: sans, fontSize: 11, color: C.ink, textAlign: "right" }}>{r.label}</div>
+          <div style={{ flex: 1, background: C.paper2, borderRadius: 4, height: 16, position: "relative", overflow: "hidden" }}>
+            <div style={{
+              height: "100%", borderRadius: 4, display: "flex", alignItems: "center", justifyContent: "flex-end",
+              paddingRight: 6, width: `${(100 * r.count) / max}%`, background: r.color,
+            }}>
+              {r.count > 0 && <span style={{ fontFamily: sans, fontSize: 10.5, fontWeight: 700, color: C.white }}>{r.count}</span>}
+            </div>
+          </div>
+          <div style={{ width: 20, flexShrink: 0, fontFamily: sans, fontSize: 11, fontWeight: 700, color: C.ink }}>{r.count}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* Generic donut for a shape/direction breakdown — `segments` is [{label, value, color}, ...].
+   Uses the same stroke-dasharray/dashoffset trick as the mockup (r=15.9 makes the circle's
+   circumference ≈100, so percentages map ~1:1 to dash lengths), but computed from real counts
+   instead of hand-picked numbers, walking cumulative offset so any number of non-zero segments
+   lines up correctly (unlike the mockup's hardcoded 3/4/5-segment versions). */
+function StatDonut({ segments, centerValue, centerLabel }) {
+  const total = segments.reduce((sum, seg) => sum + seg.value, 0);
+  if (!total) return null;
+  let cumulative = 0;
+  const arcs = segments.filter((s) => s.value > 0).map((seg) => {
+    const pct = (100 * seg.value) / total;
+    const offset = 25 - cumulative;
+    cumulative += pct;
+    return { ...seg, pct, offset };
+  });
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 20, marginBottom: 10 }}>
+      <svg width={100} height={100} viewBox="0 0 42 42">
+        <circle cx="21" cy="21" r="15.9" fill="transparent" stroke={C.paper2} strokeWidth="6" />
+        {arcs.map((a, i) => (
+          <circle key={i} cx="21" cy="21" r="15.9" fill="transparent" stroke={a.color} strokeWidth="6"
+            strokeDasharray={`${a.pct} ${100 - a.pct}`} strokeDashoffset={a.offset} transform="rotate(-90 21 21)" />
+        ))}
+        <text x="21" y="19.5" textAnchor="middle" fontFamily={serif} fontSize="6.5" fontWeight="700" fill={C.ink}>{centerValue}</text>
+        <text x="21" y="25.5" textAnchor="middle" fontFamily={sans} fontSize="3" fill={C.turf}>{centerLabel}</text>
+      </svg>
+      <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+        {segments.map((seg) => (
+          <div key={seg.label} style={{ display: "flex", alignItems: "center", gap: 7, fontFamily: sans, fontSize: 12 }}>
+            <span style={{ width: 9, height: 9, borderRadius: "50%", background: seg.color, flexShrink: 0 }} />
+            {seg.label}
+            <b style={{ marginLeft: "auto", paddingLeft: 10 }}>{Math.round((100 * seg.value) / total)}%</b>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function StrokeRoundStatsModal({ round, player, course, courseHoles, onClose }) {
+  const pid = player?.id;
+  const s = round.scores[pid] || {};
+  const stats = computeRoundStats(round, pid, courseHoles);
+  const stableford = computeStablefordTotal(round, pid, courseHoles);
+  const scoreDiff = computeScoreDifferential(round, pid, course);
+
+  const strokeRows = [
+    { label: "Eagle", count: stats.strokesByType.eagle, color: C.gold },
+    { label: "Birdie", count: stats.strokesByType.birdie, color: C.fairway },
+    { label: "Par", count: stats.strokesByType.par, color: C.turfLight },
+    { label: "Bogey", count: stats.strokesByType.bogey, color: C.brass },
+    { label: "Dbl+", count: stats.strokesByType.dbl, color: C.flag },
+    { label: "Worse", count: stats.strokesByType.worse, color: C.fairwayDark },
+  ];
+  const puttRows = [
+    { label: "0 putts", count: stats.puttsDist["0"], color: C.gold },
+    { label: "1 putt", count: stats.puttsDist["1"], color: C.fairway },
+    { label: "2 putts", count: stats.puttsDist["2"], color: C.turfLight },
+    { label: "3 putts", count: stats.puttsDist["3"], color: C.brass },
+    { label: "4+ putts", count: stats.puttsDist["4+"], color: C.flag },
+  ];
+  const teeSegments = [
+    { label: "Fairway", value: stats.shapeCounts.fairway || 0, color: C.turf },
+    { label: "Left", value: stats.shapeCounts.left || 0, color: C.flag },
+    { label: "Right", value: stats.shapeCounts.right || 0, color: C.brass },
+  ];
+  const teeTotal = teeSegments.reduce((sum, x) => sum + x.value, 0);
+  const par3Segments = [
+    { label: "Green", value: stats.par3ShapeCounts.green || 0, color: C.turf },
+    { label: "Long", value: stats.par3ShapeCounts.long || 0, color: C.team2 },
+    { label: "Left", value: stats.par3ShapeCounts.left || 0, color: C.flag },
+    { label: "Right", value: stats.par3ShapeCounts.right || 0, color: C.brass },
+    { label: "Short", value: stats.par3ShapeCounts.short || 0, color: C.turfLight },
+  ];
+  const par3Total = par3Segments.reduce((sum, x) => sum + x.value, 0);
+
+  return (
+    <div
+      style={{ position: "fixed", inset: 0, background: "rgba(21,42,32,.45)", zIndex: 1200, display: "flex", alignItems: "flex-end", justifyContent: "center" }}
+      onClick={onClose}
+    >
+      <div
+        style={{ width: "100%", maxWidth: 440, maxHeight: "88vh", overflowY: "auto", background: C.paper, borderRadius: "16px 16px 0 0", boxShadow: "0 -8px 24px rgba(0,0,0,.25)" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ width: 36, height: 4, background: C.line, borderRadius: 3, margin: "10px auto 4px" }} />
+        <div style={{ padding: "4px 18px 14px", borderBottom: `1px solid ${C.paper2}` }}>
+          <div style={{ fontFamily: serif, fontSize: 18, fontWeight: 700, color: C.fairway }}>{player?.name || "?"}</div>
+          <div style={{ fontFamily: sans, fontSize: 11.5, color: C.turf, marginTop: 2 }}>{round.courseName} · Stroke Play · {round.date}</div>
+        </div>
+        <div style={{ padding: "16px 18px 28px" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 22 }}>
+            <div style={statsTileStyle}>
+              <div style={{ fontFamily: serif, fontSize: 19, fontWeight: 700, color: C.fairway }}>{s.gross ?? "—"}</div>
+              <div style={{ fontFamily: sans, fontSize: 9.5, textTransform: "uppercase", letterSpacing: "0.04em", color: C.turf, marginTop: 3 }}>Gross</div>
+            </div>
+            <div style={statsTileStyle}>
+              <div style={{ fontFamily: serif, fontSize: 19, fontWeight: 700, color: C.fairway }}>{s.net ?? "—"}</div>
+              <div style={{ fontFamily: sans, fontSize: 9.5, textTransform: "uppercase", letterSpacing: "0.04em", color: C.turf, marginTop: 3 }}>Net (CH {s.courseHandicap ?? "—"})</div>
+            </div>
+            <div style={statsTileStyle}>
+              <div style={{ fontFamily: serif, fontSize: 19, fontWeight: 700, color: C.brass }}>{stableford ?? "—"}</div>
+              <div style={{ fontFamily: sans, fontSize: 9.5, textTransform: "uppercase", letterSpacing: "0.04em", color: C.turf, marginTop: 3 }}>Stableford pts</div>
+            </div>
+            <div style={statsTileStyle}>
+              <div style={{ fontFamily: serif, fontSize: 19, fontWeight: 700, color: C.fairway }}>{scoreDiff != null ? scoreDiff.toFixed(1) : "—"}</div>
+              <div style={{ fontFamily: sans, fontSize: 9.5, textTransform: "uppercase", letterSpacing: "0.04em", color: C.turf, marginTop: 3 }}>Score diff</div>
+            </div>
+          </div>
+
+          <div style={statsSectionLabelStyle}>Strokes by hole</div>
+          <StatBarChart rows={strokeRows} />
+
+          <div style={statsSectionLabelStyle}>Putts per hole</div>
+          <StatBarChart rows={puttRows} />
+
+          <div style={statsSectionLabelStyle}>Accuracy</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 24 }}>
+            <div style={statsMiniStatStyle}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                <span style={{ fontFamily: serif, fontSize: 20, fontWeight: 700, color: C.fairway }}>{stats.gir != null ? `${stats.gir}%` : "—"}</span>
+                <span style={{ fontFamily: sans, fontSize: 10.5, color: C.turf }}>{stats.girHit}/{stats.girAttempts}</span>
+              </div>
+              <div style={{ fontFamily: sans, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", color: C.turf, marginTop: 6 }}>Greens in reg.</div>
+              <div style={{ background: C.paper2, borderRadius: 3, height: 5, marginTop: 8, overflow: "hidden" }}>
+                <div style={{ height: "100%", background: C.fairway, borderRadius: 3, width: `${stats.gir || 0}%` }} />
+              </div>
+            </div>
+            <div style={statsMiniStatStyle}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                <span style={{ fontFamily: serif, fontSize: 20, fontWeight: 700, color: C.fairway }}>{stats.fir != null ? `${stats.fir}%` : "—"}</span>
+                <span style={{ fontFamily: sans, fontSize: 10.5, color: C.turf }}>{stats.firHit}/{stats.firAttempts}</span>
+              </div>
+              <div style={{ fontFamily: sans, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", color: C.turf, marginTop: 6 }}>Fairways hit</div>
+              <div style={{ background: C.paper2, borderRadius: 3, height: 5, marginTop: 8, overflow: "hidden" }}>
+                <div style={{ height: "100%", background: C.fairway, borderRadius: 3, width: `${stats.fir || 0}%` }} />
+              </div>
+            </div>
+            <div style={statsMiniStatStyle}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                <span style={{ fontFamily: serif, fontSize: 20, fontWeight: 700, color: C.ink }}>{stats.penaltyCount}</span>
+                <span style={{ fontFamily: sans, fontSize: 10.5, color: C.turf }}>{stats.penaltyCount === 1 ? "stroke" : "strokes"}</span>
+              </div>
+              <div style={{ fontFamily: sans, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", color: C.turf, marginTop: 6 }}>Penalties</div>
+              <div style={{ background: C.paper2, borderRadius: 3, height: 5, marginTop: 8, overflow: "hidden" }}>
+                <div style={{ height: "100%", background: C.flag, borderRadius: 3, width: `${Math.min(100, stats.penaltyCount * 15)}%` }} />
+              </div>
+            </div>
+            <div style={{ ...statsMiniStatStyle, borderStyle: "dashed", opacity: 0.55 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                <span style={{ fontFamily: serif, fontSize: 13, fontWeight: 700, color: C.turf }}>—</span>
+                <span style={{ fontFamily: sans, fontSize: 10.5, color: C.turf }}>soon</span>
+              </div>
+              <div style={{ fontFamily: sans, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", color: C.turf, marginTop: 6 }}>Sand shots</div>
+            </div>
+          </div>
+
+          <div style={statsSectionLabelStyle}>Tee shot direction (par 4/5)</div>
+          {teeTotal > 0
+            ? <StatDonut segments={teeSegments} centerValue={teeTotal} centerLabel="drives" />
+            : <div style={statsCaveatStyle}>No tee-shot direction recorded for this round yet.</div>}
+
+          <div style={statsSectionLabelStyle}>Par-3 tee shot direction</div>
+          {par3Total > 0
+            ? <StatDonut segments={par3Segments} centerValue={par3Total} centerLabel="par-3s" />
+            : <div style={statsCaveatStyle}>No par-3 tee shots recorded for this round yet.</div>}
+
+          <div style={statsSectionLabelStyle}>Approach shot direction (par 4/5)</div>
+          <div style={statsCaveatStyle}>
+            Not tracked yet — needs a new "how'd the approach finish" capture step for par‑4/5 (Long/Left/Right/Short), the same idea as the Long/Green/Left/Right/Short picker par‑3 tee shots already use. Once in, this chart also gives a true GIR flag for par‑4/5 instead of today's inferred one.
+          </div>
+
+          <button style={{ ...btnGhost, width: "100%", marginTop: 8, boxSizing: "border-box" }} onClick={onClose}>Close</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -5219,7 +5537,7 @@ function HistoryTab({ rounds, players, courses, distanceUnit }) {
               <div style={{ marginTop: 10, borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
                 {isBB
                   ? <RoundDetailBetterBall round={r} players={players} courseHoles={course?.holes || []} distanceUnit={distanceUnit} />
-                  : <RoundDetailStroke round={r} players={players} courseHoles={course?.holes || []} distanceUnit={distanceUnit} />}
+                  : <RoundDetailStroke round={r} players={players} course={course} courseHoles={course?.holes || []} distanceUnit={distanceUnit} />}
               </div>
             )}
           </div>

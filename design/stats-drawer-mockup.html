@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Linksman — History & Stats mockup</title>
+<style>
+  :root {
+    --ink: #24261F;
+    --paper: #F5F1E6;
+    --paper2: #EDE7D6;
+    --fairway: #1E3A2B;
+    --fairwayDark: #152A20;
+    --turf: #3F6B4A;
+    --turfLight: #5C8A63;
+    --flag: #B23A2E;
+    --brass: #A98B4F;
+    --line: #C9C2AC;
+    --white: #FBF9F2;
+    --gold: #C9A227;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #DCD5C1; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: var(--ink); display: flex; justify-content: center; padding: 24px 0 80px;
+  }
+  .phone { width: 390px; background: var(--paper); min-height: 100vh; box-shadow: 0 0 0 1px var(--line); position: relative; }
+  .ribbon {
+    background: var(--fairway); color: var(--white); padding: 14px 16px;
+    display: flex; align-items: center; justify-content: space-between; font-family: Georgia, serif;
+  }
+  .ribbon .back { font-size: 20px; opacity: .85; }
+  .ribbon .title { font-size: 15px; font-weight: 700; letter-spacing: .02em; }
+  .content { padding: 14px; }
+  .note {
+    font-family: -apple-system, sans-serif; font-size: 11px; color: var(--turf); background: var(--paper2);
+    border: 1px dashed var(--line); border-radius: 6px; padding: 8px 10px; margin-bottom: 14px; line-height: 1.5;
+  }
+  .roundCard {
+    background: var(--white); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 12px; overflow: hidden;
+  }
+  .roundHead { padding: 12px 14px; }
+  .roundTop { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .courseName { font-family: Georgia, serif; font-size: 16px; font-weight: 700; color: var(--fairway); }
+  .roundFormat {
+    font-size: 9.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--turf);
+    border: 1px solid var(--turf); border-radius: 4px; padding: 2px 6px; flex-shrink: 0;
+  }
+  .roundMeta { font-size: 11.5px; color: var(--turf); font-family: -apple-system, sans-serif; margin-top: 2px; }
+  .playerRow {
+    display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-top: 1px solid var(--paper2);
+  }
+  .avatar {
+    width: 30px; height: 30px; border-radius: 50%; background: var(--fairway); color: var(--white);
+    display: flex; align-items: center; justify-content: center; font-family: Georgia, serif; font-weight: 700; font-size: 13px; flex-shrink: 0;
+  }
+  .avatar.team2 { background: var(--brass); }
+  .pname { font-family: -apple-system, sans-serif; font-size: 13.5px; font-weight: 600; flex: 1; min-width: 0; }
+  .pscoreline { display: flex; align-items: baseline; gap: 10px; flex-shrink: 0; }
+  .pscore-big { font-family: Georgia, serif; font-size: 17px; font-weight: 700; color: var(--ink); }
+  .pscore-rel { font-family: -apple-system, sans-serif; font-size: 11.5px; font-weight: 700; }
+  .rel-over { color: var(--flag); }
+  .rel-under { color: var(--fairway); }
+  .statsBtn {
+    display: flex; align-items: center; gap: 6px; background: var(--fairway); color: var(--white); border: none;
+    border-radius: 6px; padding: 7px 12px; font-family: -apple-system, sans-serif; font-size: 12px; font-weight: 700;
+    letter-spacing: .02em; cursor: pointer; flex-shrink: 0;
+  }
+  .statsBtn:active { background: var(--fairwayDark); }
+
+  /* ---- expanded scorecard ---- */
+  .scorecard { border-top: 1px solid var(--paper2); padding: 12px 14px 14px; }
+  table.sc { width: 100%; border-collapse: collapse; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+  table.sc th, table.sc td { text-align: center; padding: 4px 2px; }
+  table.sc thead tr.holeRow { background: var(--fairway); color: var(--white); }
+  table.sc thead tr.holeRow th:first-child { text-align: left; padding-left: 4px; }
+  table.sc tr.hcpRow td { color: var(--turf); font-size: 10.5px; }
+  table.sc tr.parRow td { color: var(--ink); font-weight: 600; }
+  table.sc tr.parRow td:first-child, table.sc tr.hcpRow td:first-child { text-align: left; padding-left: 4px; font-family: -apple-system, sans-serif; text-transform: uppercase; font-size: 9.5px; color: var(--turf); letter-spacing: .04em; }
+  table.sc tr.scoreRow td:first-child { text-align: left; padding-left: 4px; font-family: -apple-system, sans-serif; text-transform: uppercase; font-size: 9.5px; color: var(--turf); letter-spacing: .04em; }
+  .out td { border-top: 1px solid var(--line); font-weight: 700; }
+  .badge {
+    display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 5px;
+    font-weight: 700; font-size: 12px;
+  }
+  .b-eagle { background: var(--gold); color: var(--ink); }
+  .b-birdie { background: var(--fairway); color: var(--white); }
+  .b-par { background: transparent; color: var(--ink); }
+  .b-bogey { background: var(--paper2); color: var(--ink); border: 1px solid var(--line); }
+  .b-dbogey { background: var(--flag); color: var(--white); }
+  .b-worse { background: var(--fairwayDark); color: var(--white); }
+
+  .cardFooter { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; }
+  .footerStat { font-family: -apple-system, sans-serif; font-size: 11px; color: var(--turf); }
+  .footerStat b { color: var(--ink); font-size: 13px; }
+
+  /* ---- stats drawer ---- */
+  .drawerBackdrop {
+    position: fixed; inset: 0; background: rgba(21,42,32,.45); display: flex; align-items: flex-end; justify-content: center; z-index: 20;
+  }
+  .drawer {
+    width: 390px; max-height: 88vh; overflow-y: auto; background: var(--paper); border-radius: 16px 16px 0 0;
+    box-shadow: 0 -8px 24px rgba(0,0,0,.25);
+  }
+  .drawerHandle { width: 36px; height: 4px; background: var(--line); border-radius: 3px; margin: 10px auto 4px; }
+  .drawerHead { padding: 4px 18px 14px; border-bottom: 1px solid var(--paper2); }
+  .drawerTitle { font-family: Georgia, serif; font-size: 18px; font-weight: 700; color: var(--fairway); }
+  .drawerSub { font-family: -apple-system, sans-serif; font-size: 11.5px; color: var(--turf); margin-top: 2px; }
+  .drawerBody { padding: 16px 18px 28px; }
+
+  .sectionLabel {
+    font-family: -apple-system, sans-serif; font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--turf); margin: 0 0 10px;
+  }
+  .headlineGrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 22px; }
+  .tile {
+    background: var(--white); border: 1px solid var(--line); border-radius: 8px; padding: 10px 6px; text-align: center;
+  }
+  .tile .val { font-family: Georgia, serif; font-size: 19px; font-weight: 700; color: var(--fairway); line-height: 1.1; }
+  .tile .val small { font-size: 11px; font-weight: 600; color: var(--turf); }
+  .tile .lbl { font-family: -apple-system, sans-serif; font-size: 9.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--turf); margin-top: 3px; }
+  .tile.accent .val { color: var(--brass); }
+
+  .barChart { margin-bottom: 24px; }
+  .barRow { display: flex; align-items: center; gap: 10px; margin-bottom: 7px; }
+  .barLabel { width: 54px; flex-shrink: 0; font-family: -apple-system, sans-serif; font-size: 11px; color: var(--ink); text-align: right; }
+  .barTrack { flex: 1; background: var(--paper2); border-radius: 4px; height: 16px; position: relative; overflow: hidden; }
+  .barFill { height: 100%; border-radius: 4px; display: flex; align-items: center; justify-content: flex-end; padding-right: 6px; }
+  .barFill span { font-family: -apple-system, sans-serif; font-size: 10.5px; font-weight: 700; color: var(--white); }
+  .barCount { width: 18px; flex-shrink: 0; font-family: -apple-system, sans-serif; font-size: 11px; font-weight: 700; color: var(--ink); }
+
+  .miniStatsGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 24px; }
+  .miniStat { background: var(--white); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+  .miniStat .top { display: flex; justify-content: space-between; align-items: baseline; }
+  .miniStat .pct { font-family: Georgia, serif; font-size: 20px; font-weight: 700; color: var(--fairway); }
+  .miniStat .frac { font-family: -apple-system, sans-serif; font-size: 10.5px; color: var(--turf); }
+  .miniStat .lbl { font-family: -apple-system, sans-serif; font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--turf); margin-top: 6px; }
+  .progressTrack { background: var(--paper2); border-radius: 3px; height: 5px; margin-top: 8px; overflow: hidden; }
+  .progressFill { height: 100%; background: var(--fairway); border-radius: 3px; }
+
+  .donutWrap { display: flex; align-items: center; gap: 20px; margin-bottom: 10px; }
+  .legend { display: flex; flex-direction: column; gap: 7px; }
+  .legendItem { display: flex; align-items: center; gap: 7px; font-family: -apple-system, sans-serif; font-size: 12px; }
+  .legendDot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .legendItem b { margin-left: auto; padding-left: 10px; }
+
+  .caveat {
+    font-family: -apple-system, sans-serif; font-size: 10.5px; color: var(--turf); line-height: 1.5;
+    background: var(--paper2); border-radius: 6px; padding: 8px 10px; margin-top: 4px;
+  }
+
+  .miniStat.ghost { border-style: dashed; opacity: .55; }
+  .miniStat.ghost .pct { color: var(--turf); font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="phone">
+  <div class="ribbon">
+    <span class="back">←</span>
+    <span class="title">HISTORY</span>
+    <span style="width:20px"></span>
+  </div>
+
+  <div class="content">
+    <div class="note">
+      MOCKUP — own visual direction (parchment / fairway-green, matching the rest of Linksman) rather than the reference screenshots' look. Sample numbers, not wired to real round data yet. Tap "Stats" to preview the drawer.
+    </div>
+
+    <div class="roundCard">
+      <div class="roundHead">
+        <div class="roundTop">
+          <div class="courseName">Bellville Golf Club</div>
+          <div class="roundFormat">Stroke Play</div>
+        </div>
+        <div class="roundMeta">18 holes · 18 Jul 2026 · 18:00</div>
+      </div>
+
+      <div class="playerRow">
+        <div class="avatar">W</div>
+        <div class="pname">Wouter Breytenbach</div>
+        <div class="pscoreline">
+          <span class="pscore-big">93</span>
+          <span class="pscore-rel rel-over">+21</span>
+        </div>
+      </div>
+      <div class="playerRow">
+        <div class="avatar team2">C</div>
+        <div class="pname">Chris Hall</div>
+        <div class="pscoreline">
+          <span class="pscore-big">97</span>
+          <span class="pscore-rel rel-over">+25</span>
+        </div>
+      </div>
+
+      <div class="scorecard">
+        <table class="sc">
+          <thead>
+            <tr class="holeRow">
+              <th>Hole</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>Out</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="hcpRow"><td>Hcp</td><td>12</td><td>10</td><td>6</td><td>16</td><td>14</td><td>2</td><td>18</td><td>4</td><td>8</td><td></td></tr>
+            <tr class="parRow"><td>Par</td><td>4</td><td>4</td><td>5</td><td>3</td><td>4</td><td>4</td><td>3</td><td>5</td><td>4</td><td>36</td></tr>
+            <tr class="scoreRow">
+              <td>Score</td>
+              <td><span class="badge b-dbogey">7</span></td>
+              <td><span class="badge b-bogey">5</span></td>
+              <td><span class="badge b-par">5</span></td>
+              <td><span class="badge b-bogey">4</span></td>
+              <td><span class="badge b-bogey">5</span></td>
+              <td><span class="badge b-dbogey">6</span></td>
+              <td><span class="badge b-bogey">4</span></td>
+              <td><span class="badge b-bogey">6</span></td>
+              <td><span class="badge b-worse">8</span></td>
+              <td style="font-weight:700">50</td>
+            </tr>
+            <tr class="holeRow" style="height:4px"><th colspan="11" style="padding:2px"></th></tr>
+            <tr class="hcpRow"><td>Hcp</td><td>9</td><td>1</td><td>15</td><td>5</td><td>17</td><td>7</td><td>11</td><td>3</td><td>13</td><td></td></tr>
+            <tr class="parRow"><td>Par</td><td>4</td><td>4</td><td>3</td><td>4</td><td>5</td><td>3</td><td>5</td><td>4</td><td>18</td><td>36</td></tr>
+            <tr class="scoreRow">
+              <td>Score</td>
+              <td><span class="badge b-par">4</span></td>
+              <td><span class="badge b-par">4</span></td>
+              <td><span class="badge b-bogey">4</span></td>
+              <td><span class="badge b-dbogey">6</span></td>
+              <td><span class="badge b-par">5</span></td>
+              <td><span class="badge b-dbogey">6</span></td>
+              <td><span class="badge b-birdie">3</span></td>
+              <td><span class="badge b-bogey">6</span></td>
+              <td><span class="badge b-par">5</span></td>
+              <td style="font-weight:700">43</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="cardFooter">
+          <div class="footerStat">Gross <b>93</b> · Net <b>73</b></div>
+          <div class="footerStat" style="color:var(--brass)">Stableford <b>36</b> pts</div>
+          <button class="statsBtn" onclick="document.getElementById('drawer').style.display='flex'">📊 Stats</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="roundCard" style="opacity:.5;">
+      <div class="roundHead">
+        <div class="roundTop">
+          <div class="courseName">Steenberg Golf Club</div>
+          <div class="roundFormat">Better Ball</div>
+        </div>
+        <div class="roundMeta">18 holes · 12 Jul 2026 · 07:30 — tap to expand</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="drawer" class="drawerBackdrop" style="display:none;">
+  <div class="drawer">
+    <div class="drawerHandle"></div>
+    <div class="drawerHead">
+      <div class="drawerTitle">Wouter Breytenbach</div>
+      <div class="drawerSub">Bellville Golf Club · Stroke Play · 18 Jul 2026</div>
+    </div>
+    <div class="drawerBody">
+
+      <div class="headlineGrid">
+        <div class="tile">
+          <div class="val">93</div>
+          <div class="lbl">Gross</div>
+        </div>
+        <div class="tile">
+          <div class="val">73 <small>+1</small></div>
+          <div class="lbl">Net (CH 20)</div>
+        </div>
+        <div class="tile accent">
+          <div class="val">36</div>
+          <div class="lbl">Stableford pts</div>
+        </div>
+        <div class="tile">
+          <div class="val">17.5</div>
+          <div class="lbl">Score diff</div>
+        </div>
+      </div>
+
+      <div class="sectionLabel">Strokes by hole</div>
+      <div class="barChart">
+        <div class="barRow">
+          <div class="barLabel">Eagle</div>
+          <div class="barTrack"><div class="barFill" style="width:0%; background:var(--gold);"></div></div>
+          <div class="barCount">0</div>
+        </div>
+        <div class="barRow">
+          <div class="barLabel">Birdie</div>
+          <div class="barTrack"><div class="barFill" style="width:11%; background:var(--fairway);"><span>1</span></div></div>
+          <div class="barCount">1</div>
+        </div>
+        <div class="barRow">
+          <div class="barLabel">Par</div>
+          <div class="barTrack"><div class="barFill" style="width:44%; background:var(--turfLight);"><span>4</span></div></div>
+          <div class="barCount">4</div>
+        </div>
+        <div class="barRow">
+          <div class="barLabel">Bogey</div>
+          <div class="barTrack"><div class="barFill" style="width:100%; background:var(--brass);"><span>9</span></div></div>
+          <div class="barCount">9</div>
+        </div>
+        <div class="barRow">
+          <div class="barLabel">Dbl+</div>
+          <div class="barTrack"><div class="barFill" style="width:33%; background:var(--flag);"><span>3</span></div></div>
+          <div class="barCount">3</div>
+        </div>
+        <div class="barRow">
+          <div class="barLabel">Worse</div>
+          <div class="barTrack"><div class="barFill" style="width:11%; background:var(--fairwayDark);"><span>1</span></div></div>
+          <div class="barCount">1</div>
+        </div>
+      </div>
+
+      <div class="sectionLabel">Putts per hole</div>
+      <div class="barChart">
+        <div class="barRow">
+          <div class="barLabel">0 putts</div>
+          <div class="barTrack"><div class="barFill" style="width:11%; background:var(--gold);"></div></div>
+          <div class="barCount">1</div>
+        </div>
+        <div class="barRow">
+          <div class="barLabel">1 putt</div>
+          <div class="barTrack"><div class="barFill" style="width:44%; background:var(--fairway);"><span>4</span></div></div>
+          <div class="barCount">4</div>
+        </div>
+        <div class="barRow">
+          <div class="barLabel">2 putts</div>
+          <div class="barTrack"><div class="barFill" style="width:100%; background:var(--turfLight);"><span>9</span></div></div>
+          <div class="barCount">9</div>
+        </div>
+        <div class="barRow">
+          <div class="barLabel">3 putts</div>
+          <div class="barTrack"><div class="barFill" style="width:33%; background:var(--brass);"><span>3</span></div></div>
+          <div class="barCount">3</div>
+        </div>
+        <div class="barRow">
+          <div class="barLabel">4+ putts</div>
+          <div class="barTrack"><div class="barFill" style="width:11%; background:var(--flag);"></div></div>
+          <div class="barCount">1</div>
+        </div>
+      </div>
+
+      <div class="sectionLabel">Accuracy</div>
+      <div class="miniStatsGrid">
+        <div class="miniStat">
+          <div class="top"><span class="pct">17%</span><span class="frac">3 / 18</span></div>
+          <div class="lbl">Greens in reg.</div>
+          <div class="progressTrack"><div class="progressFill" style="width:17%"></div></div>
+        </div>
+        <div class="miniStat">
+          <div class="top"><span class="pct">36%</span><span class="frac">4 / 11</span></div>
+          <div class="lbl">Fairways hit</div>
+          <div class="progressTrack"><div class="progressFill" style="width:36%"></div></div>
+        </div>
+        <div class="miniStat">
+          <div class="top"><span class="pct">1</span><span class="frac">stroke</span></div>
+          <div class="lbl">Penalties</div>
+          <div class="progressTrack"><div class="progressFill" style="width:15%; background:var(--flag);"></div></div>
+        </div>
+        <div class="miniStat ghost">
+          <div class="top"><span class="pct">—</span><span class="frac">soon</span></div>
+          <div class="lbl">Sand shots</div>
+          <div class="progressTrack"><div class="progressFill" style="width:0%; background:var(--turf);"></div></div>
+        </div>
+      </div>
+
+      <div class="sectionLabel">Tee shot direction (par 4/5)</div>
+      <div class="donutWrap">
+        <svg width="110" height="110" viewBox="0 0 42 42">
+          <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="var(--paper2)" stroke-width="6"></circle>
+          <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="var(--turf)" stroke-width="6"
+                  stroke-dasharray="36 64" stroke-dashoffset="25" transform="rotate(-90 21 21)"></circle>
+          <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="var(--flag)" stroke-width="6"
+                  stroke-dasharray="27 73" stroke-dashoffset="-11" transform="rotate(-90 21 21)"></circle>
+          <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="var(--brass)" stroke-width="6"
+                  stroke-dasharray="37 63" stroke-dashoffset="-38" transform="rotate(-90 21 21)"></circle>
+          <text x="21" y="19.5" text-anchor="middle" font-family="Georgia, serif" font-size="6.5" font-weight="700" fill="var(--ink)">11</text>
+          <text x="21" y="25.5" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="3" fill="var(--turf)">drives</text>
+        </svg>
+        <div class="legend">
+          <div class="legendItem"><span class="legendDot" style="background:var(--turf)"></span>Fairway <b>36%</b></div>
+          <div class="legendItem"><span class="legendDot" style="background:var(--flag)"></span>Left <b>27%</b></div>
+          <div class="legendItem"><span class="legendDot" style="background:var(--brass)"></span>Right <b>37%</b></div>
+        </div>
+      </div>
+      <div class="caveat">
+        This one's real today — tee shots already capture Left/Fairway/Right on every par‑4/5.
+      </div>
+
+      <div class="sectionLabel" style="margin-top:20px;">Approach shot direction (par 4/5)</div>
+      <div class="donutWrap">
+        <svg width="110" height="110" viewBox="0 0 42 42">
+          <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="var(--paper2)" stroke-width="6"></circle>
+          <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="var(--turfLight)" stroke-width="6"
+                  stroke-dasharray="23 77" stroke-dashoffset="25" transform="rotate(-90 21 21)"></circle>
+          <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="var(--flag)" stroke-width="6"
+                  stroke-dasharray="31 69" stroke-dashoffset="2" transform="rotate(-90 21 21)"></circle>
+          <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="var(--brass)" stroke-width="6"
+                  stroke-dasharray="23 77" stroke-dashoffset="-29" transform="rotate(-90 21 21)"></circle>
+          <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="var(--fairwayDark)" stroke-width="6"
+                  stroke-dasharray="23 77" stroke-dashoffset="-52" transform="rotate(-90 21 21)"></circle>
+          <text x="21" y="19.5" text-anchor="middle" font-family="Georgia, serif" font-size="6.5" font-weight="700" fill="var(--ink)">13</text>
+          <text x="21" y="25.5" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="3" fill="var(--turf)">approaches</text>
+        </svg>
+        <div class="legend">
+          <div class="legendItem"><span class="legendDot" style="background:var(--turfLight)"></span>Long <b>23%</b></div>
+          <div class="legendItem"><span class="legendDot" style="background:var(--flag)"></span>Left <b>31%</b></div>
+          <div class="legendItem"><span class="legendDot" style="background:var(--brass)"></span>Right <b>23%</b></div>
+          <div class="legendItem"><span class="legendDot" style="background:var(--fairwayDark)"></span>Short <b>23%</b></div>
+        </div>
+      </div>
+      <div class="caveat">
+        Not tracked yet — needs a new "how'd the approach finish" capture step for par‑4/5 (Long/Left/Right/Short), the same idea as the Long/Green/Left/Right/Short picker par‑3 tee shots already use. Once in, this chart also gives us a true GIR flag for par‑4/5 instead of today's inferred one.
+      </div>
+
+      <div class="sectionLabel" style="margin-top:20px;">Par‑3 tee shot direction</div>
+      <div class="donutWrap">
+        <svg width="110" height="110" viewBox="0 0 42 42">
+          <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="var(--paper2)" stroke-width="6"></circle>
+          <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="var(--fairway)" stroke-width="6"
+                  stroke-dasharray="42 58" stroke-dashoffset="25" transform="rotate(-90 21 21)"></circle>
+          <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="var(--turfLight)" stroke-width="6"
+                  stroke-dasharray="17 83" stroke-dashoffset="-17" transform="rotate(-90 21 21)"></circle>
+          <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="var(--flag)" stroke-width="6"
+                  stroke-dasharray="12 88" stroke-dashoffset="-34" transform="rotate(-90 21 21)"></circle>
+          <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="var(--brass)" stroke-width="6"
+                  stroke-dasharray="12 88" stroke-dashoffset="-46" transform="rotate(-90 21 21)"></circle>
+          <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="var(--fairwayDark)" stroke-width="6"
+                  stroke-dasharray="17 83" stroke-dashoffset="-58" transform="rotate(-90 21 21)"></circle>
+          <text x="21" y="19.5" text-anchor="middle" font-family="Georgia, serif" font-size="6.5" font-weight="700" fill="var(--ink)">4</text>
+          <text x="21" y="25.5" text-anchor="middle" font-family="-apple-system, sans-serif" font-size="3" fill="var(--turf)">par-3s</text>
+        </svg>
+        <div class="legend">
+          <div class="legendItem"><span class="legendDot" style="background:var(--fairway)"></span>Green <b>42%</b></div>
+          <div class="legendItem"><span class="legendDot" style="background:var(--turfLight)"></span>Long <b>17%</b></div>
+          <div class="legendItem"><span class="legendDot" style="background:var(--flag)"></span>Left <b>12%</b></div>
+          <div class="legendItem"><span class="legendDot" style="background:var(--brass)"></span>Right <b>12%</b></div>
+          <div class="legendItem"><span class="legendDot" style="background:var(--fairwayDark)"></span>Short <b>17%</b></div>
+        </div>
+      </div>
+      <div class="caveat">
+        Also real today — par‑3 tee shots already capture Green/Long/Left/Right/Short, so this one's ready to wire up alongside the tee-shot chart above.
+      </div>
+
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
