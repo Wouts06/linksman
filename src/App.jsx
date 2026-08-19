@@ -5250,13 +5250,25 @@ function StrokeRoundStatsModal({ round, player, course, courseHoles, onClose }) 
   ];
   const par3Total = par3Segments.reduce((sum, x) => sum + x.value, 0);
 
+  /* Lock the page behind the drawer while it's open (19 Aug fix) — a `position: fixed` overlay
+     doesn't stop the underlying page from still being scrollable on mobile (iOS Safari in
+     particular happily scrolls content behind a fixed layer via touch), so without this the
+     History list behind the drawer visibly moves as you scroll the stats. Restores whatever
+     overflow value was already on body (rather than assuming "") so this can't clobber some
+     other feature that also touches body overflow. */
+  useEffect(() => {
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = prevOverflow; };
+  }, []);
+
   return (
     <div
-      style={{ position: "fixed", inset: 0, background: "rgba(21,42,32,.45)", zIndex: 1200, display: "flex", alignItems: "flex-end", justifyContent: "center" }}
+      style={{ position: "fixed", inset: 0, background: "rgba(21,42,32,.45)", zIndex: 1200, display: "flex", alignItems: "flex-end", justifyContent: "center", overflow: "hidden" }}
       onClick={onClose}
     >
       <div
-        style={{ width: "100%", maxWidth: 440, maxHeight: "88vh", overflowY: "auto", background: C.paper, borderRadius: "16px 16px 0 0", boxShadow: "0 -8px 24px rgba(0,0,0,.25)" }}
+        style={{ width: "100%", maxWidth: 440, maxHeight: "88vh", overflowY: "auto", overflowX: "hidden", background: C.paper, borderRadius: "16px 16px 0 0", boxShadow: "0 -8px 24px rgba(0,0,0,.25)", boxSizing: "border-box" }}
         onClick={(e) => e.stopPropagation()}
       >
         <div style={{ width: 36, height: 4, background: C.line, borderRadius: 3, margin: "10px auto 4px" }} />
