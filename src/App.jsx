@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef, useId } from "react";
-import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from "recharts";
 import { MapContainer, TileLayer, Marker, CircleMarker, Polygon, useMapEvents, useMap } from "react-leaflet";
 import L from "leaflet";
 import markerIcon2x from "leaflet/dist/images/marker-icon-2x.png";
@@ -5014,6 +5013,98 @@ function bbAdvancedStats(holeDetails, courseHoles) {
   return stats;
 }
 
+/* ---------- compact scorecard (19 Aug) ----------
+   Replaces the old dense Hole/Par/Score/Putts/Drive/Club/Other-shots table in the History round
+   view with the mockup's compact Out/In badge grid — per the user's explicit choice to replace
+   rather than keep both. The dropped per-hole shot detail (putts/drive/club/penalties) isn't
+   gone from the app, just from this glance view: putts and penalties are now aggregate stats in
+   the Stats drawer; raw per-shot drive/club detail has no home in either view right now (flagged
+   to the user rather than silently lost). */
+function chunkHoles(holes, size) {
+  const out = [];
+  for (let i = 0; i < holes.length; i += size) out.push(holes.slice(i, i + size));
+  return out;
+}
+function ScoreBadgeFilled({ gross, par }) {
+  if (gross == null || gross === "" || par == null)
+    return <span style={{ color: C.line, fontFamily: mono, fontSize: 12 }}>–</span>;
+  const diff = gross - par;
+  let bg = "transparent", color = C.ink, border = "none";
+  if (diff <= -2) { bg = C.gold; color = C.ink; }
+  else if (diff === -1) { bg = C.fairway; color = C.white; }
+  else if (diff === 0) { bg = "transparent"; color = C.ink; }
+  else if (diff === 1) { bg = C.paper2; color = C.ink; border = `1px solid ${C.line}`; }
+  else if (diff === 2) { bg = C.flag; color = C.white; }
+  else { bg = C.fairwayDark; color = C.white; }
+  return (
+    <span style={{
+      display: "inline-flex", alignItems: "center", justifyContent: "center", width: 22, height: 22,
+      borderRadius: 5, fontWeight: 700, fontSize: 12, fontFamily: mono, background: bg, color, border,
+    }}>
+      {gross}
+    </span>
+  );
+}
+const scTh = { textAlign: "center", padding: "4px 2px", fontFamily: sans, fontSize: 9.5, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: C.white, background: C.fairway };
+const scTdLabel = { textAlign: "left", padding: "4px 4px", fontFamily: sans, fontSize: 9.5, textTransform: "uppercase", letterSpacing: "0.04em", color: C.turf, whiteSpace: "nowrap" };
+const scTdMuted = { textAlign: "center", padding: "3px 2px", color: C.turf, fontSize: 10.5, fontFamily: mono };
+const scTd = { textAlign: "center", padding: "3px 2px", fontFamily: mono, fontSize: 12 };
+
+function CompactScorecard({ courseHoles, holesData }) {
+  const sorted = [...courseHoles].sort((a, b) => a.number - b.number);
+  const chunks = chunkHoles(sorted, 9);
+  if (!chunks.length) return null;
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      {chunks.map((chunk, ci) => {
+        const label = chunks.length > 1 ? (ci === 0 ? "Out" : ci === 1 ? "In" : `Nine ${ci + 1}`) : null;
+        const parTotal = chunk.reduce((sum, h) => sum + (Number(h.par) || 0), 0);
+        let scoreTotal = 0, scoreCounted = 0;
+        chunk.forEach((h) => {
+          const cell = holesData[h.number];
+          if (cell && cell.gross !== "" && cell.gross != null && !isNaN(Number(cell.gross))) {
+            scoreTotal += Number(cell.gross); scoreCounted += 1;
+          }
+        });
+        return (
+          <div key={ci} style={{ overflowX: "auto", minWidth: 0 }}>
+            <table style={{ borderCollapse: "collapse", width: "100%", tableLayout: "fixed" }}>
+              <thead>
+                <tr>
+                  <th style={{ ...scTh, textAlign: "left", width: 34 }}>Hole</th>
+                  {chunk.map((h) => <th key={h.number} style={scTh}>{h.number}</th>)}
+                  {label && <th style={scTh}>{label}</th>}
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td style={scTdLabel}>Hcp</td>
+                  {chunk.map((h) => <td key={h.number} style={scTdMuted}>{h.strokeIndex ?? "—"}</td>)}
+                  {label && <td style={scTdMuted}></td>}
+                </tr>
+                <tr>
+                  <td style={scTdLabel}>Par</td>
+                  {chunk.map((h) => <td key={h.number} style={scTd}>{h.par}</td>)}
+                  {label && <td style={{ ...scTd, fontWeight: 700 }}>{parTotal}</td>}
+                </tr>
+                <tr>
+                  <td style={scTdLabel}>Score</td>
+                  {chunk.map((h) => (
+                    <td key={h.number} style={scTd}>
+                      <ScoreBadgeFilled gross={holesData[h.number]?.gross} par={h.par} />
+                    </td>
+                  ))}
+                  {label && <td style={{ ...scTd, fontWeight: 700 }}>{scoreCounted ? scoreTotal : "—"}</td>}
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function RoundDetailStroke({ round, players, course, courseHoles, distanceUnit }) {
   /* holds the pid whose Stats drawer is open, null = closed — same "one nullable state var,
      modal owns no visibility of its own" convention as PenaltyPickerModal/DriveMapModal use
@@ -5024,100 +5115,38 @@ function RoundDetailStroke({ round, players, course, courseHoles, distanceUnit }
       {round.playerIds.map((pid) => {
         const player = players.find((p) => p.id === pid);
         const s = round.scores[pid];
-        const stats = computeRoundStats(round, pid, courseHoles);
-        const pieData = [
-          { name: "Fairway", value: stats.shapeCounts.fairway || 0 },
-          { name: "Left", value: stats.shapeCounts.left || 0 },
-          { name: "Right", value: stats.shapeCounts.right || 0 },
-        ].filter((d) => d.value > 0);
-        const pieColors = { Fairway: C.turf, Left: C.flag, Right: C.brass };
-        /* total penalty strokes across the round (15 Aug) — each penalized shot (drive or any
-           extra shot) already had its +1 folded into that hole's gross the moment it was tagged
-           (see applyStrokePenalty), so this is purely an informational summary, not a further
-           score adjustment. */
-        const penaltyCount = Object.values(s?.holes || {}).reduce((sum, cell) => {
-          let n = cell.drivePenalty ? 1 : 0;
-          (cell.extraShots || []).forEach((es) => { if (es.penalty) n += 1; });
-          return sum + n;
-        }, 0);
+        const stableford = computeStablefordTotal(round, pid, courseHoles);
+        const relToPar = s?.gross != null && round.par ? s.gross - round.par : null;
+        const relLabel = relToPar == null ? null : relToPar === 0 ? "E" : relToPar > 0 ? `+${relToPar}` : `${relToPar}`;
         return (
-          <div key={pid} style={{ border: `1px solid ${C.line}`, borderRadius: 8, padding: 12 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+          <div key={pid} style={{ border: `1px solid ${C.line}`, borderRadius: 8, padding: 12, minWidth: 0 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, marginBottom: 10 }}>
               <div style={{ fontFamily: serif, fontSize: 15, color: C.fairway }}>{player?.name || "?"}</div>
+              {s?.gross != null && (
+                <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexShrink: 0 }}>
+                  <span style={{ fontFamily: serif, fontSize: 17, fontWeight: 700, color: C.ink }}>{s.gross}</span>
+                  {relLabel && <span style={{ fontFamily: sans, fontSize: 12, fontWeight: 700, color: relToPar > 0 ? C.flag : relToPar < 0 ? C.fairway : C.turf }}>{relLabel}</span>}
+                </div>
+              )}
+            </div>
+
+            <CompactScorecard courseHoles={courseHoles} holesData={s?.holes || {}} />
+
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
+              <div style={{ fontFamily: sans, fontSize: 11.5, color: C.turf }}>
+                Gross <b style={{ color: C.ink }}>{s?.gross ?? "—"}</b> · Net <b style={{ color: C.ink }}>{s?.net ?? "—"}</b>
+                {stableford != null && <> · <span style={{ color: C.brass }}>Stableford <b>{stableford}</b> pts</span></>}
+              </div>
               <button
                 onClick={() => setStatsFor(pid)}
                 style={{
                   display: "flex", alignItems: "center", gap: 6, background: C.fairway, color: C.white, border: "none",
-                  borderRadius: 6, padding: "6px 10px", fontFamily: sans, fontSize: 11.5, fontWeight: 700, letterSpacing: "0.02em", cursor: "pointer",
+                  borderRadius: 6, padding: "7px 12px", fontFamily: sans, fontSize: 12, fontWeight: 700, letterSpacing: "0.02em", cursor: "pointer", flexShrink: 0,
                 }}
               >
                 📊 Stats
               </button>
             </div>
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ borderCollapse: "collapse", fontFamily: mono, fontSize: 12, width: "100%" }}>
-                <thead><tr><th style={thStyle}>Hole</th><th style={thStyle}>Par</th><th style={thStyle}>Score</th><th style={thStyle}>Putts</th><th style={thStyle}>Drive</th><th style={thStyle}>Club</th><th style={thStyle}>Other shots</th></tr></thead>
-                <tbody>
-                  {Object.keys(s?.holes || {}).map((hn) => {
-                    const cell = s.holes[hn];
-                    const hPar = courseHoles.find((h) => String(h.number) === String(hn))?.par;
-                    const extraShots = cell.extraShots || [];
-                    return (
-                      <tr key={hn}>
-                        <td style={tdStyle}>{hn}</td>
-                        <td style={tdStyle}>{hPar ?? "—"}</td>
-                        <td style={tdStyle}><ScoreBadge gross={cell.gross} par={hPar} /></td>
-                        <td style={tdStyle}>{cell.putts || "—"}</td>
-                        <td style={tdStyle}>
-                          {cell.driveYards ? `${Math.round(displayDistance(cell.driveYards, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : "—"}
-                          {cell.drivePenalty && <span style={{ color: C.flag, fontWeight: 700 }}> ⚠{cell.drivePenalty}</span>}
-                        </td>
-                        <td style={tdStyle}>{cell.club || "—"}</td>
-                        <td style={tdStyle}>
-                          {extraShots.length === 0 ? "—" : extraShots.map((es, i) => (
-                            <div key={i} style={{ whiteSpace: "nowrap" }}>
-                              S{i + 2}: {es.yards != null ? `${Math.round(displayDistance(es.yards, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : "—"}{es.club ? ` (${es.club})` : ""}
-                              {es.penalty && <span style={{ color: C.flag, fontWeight: 700 }}> ⚠{es.penalty}</span>}
-                            </div>
-                          ))}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-            <div style={{ fontFamily: sans, fontSize: 12, color: C.ink, marginTop: 10, lineHeight: 1.7 }}>
-              Gross <b>{s?.gross}</b> · Net <b>{s?.net}</b> (CH {s?.courseHandicap}) · Putts <b>{stats.totalPutts || "—"}</b>
-              {stats.fir != null && <> · FIR <b>{stats.fir}%</b> ({stats.firHit}/{stats.firAttempts})</>}
-              {stats.gir != null && <> · GIR <b>{stats.gir}%</b> ({stats.girHit}/{stats.girAttempts})</>}
-              {penaltyCount > 0 && <> · Penalties <b style={{ color: C.flag }}>{penaltyCount}</b></>}
-            </div>
-            {stats.firAttempts > 0 && (
-              /* plain-text fallback for the Fairway/Left/Right breakdown below, always
-                 rendered regardless of whether the recharts pie chart renders correctly on
-                 this device/browser — some real-device/mobile-browser combinations can fail
-                 to size a freshly-mounted ResponsiveContainer correctly, which would silently
-                 hide this data if it only lived in the chart */
-              <div style={{ fontFamily: sans, fontSize: 12, color: C.ink, marginTop: 4 }}>
-                Tee shots: <b style={{ color: C.turf }}>Fairway {stats.shapeCounts.fairway || 0}</b>
-                {" · "}<b style={{ color: C.flag }}>Left {stats.shapeCounts.left || 0}</b>
-                {" · "}<b style={{ color: C.brass }}>Right {stats.shapeCounts.right || 0}</b>
-              </div>
-            )}
-            {pieData.length > 0 && (
-              <div style={{ width: "100%", height: 190, marginTop: 6 }}>
-                <ResponsiveContainer>
-                  <PieChart>
-                    <Pie data={pieData} dataKey="value" nameKey="name" outerRadius={65} label={(d) => `${d.name} ${d.value}`}>
-                      {pieData.map((entry, i) => <Cell key={i} fill={pieColors[entry.name]} />)}
-                    </Pie>
-                    <Tooltip />
-                    <Legend />
-                  </PieChart>
-                </ResponsiveContainer>
-              </div>
-            )}
           </div>
         );
       })}
