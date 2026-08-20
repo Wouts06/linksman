@@ -5105,11 +5105,213 @@ function CompactScorecard({ courseHoles, holesData }) {
   );
 }
 
+/* ---------- landscape detail scorecard (19 Aug) ----------
+   The compact portrait scorecard above deliberately dropped per-hole club/drive-distance/putts/
+   penalties to stay glanceable — this is where that detail lives instead, in a wide table that
+   only makes sense once the phone is rotated and there's room for it. Own-data version of the
+   reference screenshot's expanded table: same idea (Hole/Hcp/Par header, then a stacked block per
+   player with several stat rows underneath), but only rows Linksman can actually back with real
+   numbers. "Match play", "Chips", and "Sand shots" from the reference are left out on purpose —
+   there's no match-play format and no chip/sand tracking yet (both explicitly future work, not
+   faked with placeholder dashes for every hole). "Gross pts" is included even though the
+   reference-inspired name doesn't map 1:1 onto anything already in this file — it's just
+   stablefordPoints() computed with 0 strokes received instead of the real course handicap
+   allowance, i.e. "what would this hole be worth playing off scratch", which is real and useful
+   next to the handicap-adjusted "Points" row. */
+function useOrientation() {
+  const getOrientation = () => (typeof window !== "undefined" && window.innerWidth > window.innerHeight ? "landscape" : "portrait");
+  const [orientation, setOrientation] = useState(getOrientation);
+  useEffect(() => {
+    const onChange = () => setOrientation(getOrientation());
+    window.addEventListener("resize", onChange);
+    window.addEventListener("orientationchange", onChange);
+    return () => {
+      window.removeEventListener("resize", onChange);
+      window.removeEventListener("orientationchange", onChange);
+    };
+  }, []);
+  return orientation;
+}
+function fmtRel(diff) {
+  if (diff == null) return "—";
+  return diff === 0 ? "E" : diff > 0 ? `+${diff}` : `${diff}`;
+}
+/* Per-hole + Out/In/Tot totals for one player, computed once up front so the table renderer
+   below just reads values instead of recomputing per cell. */
+function computePlayerHoleMetrics(round, pid, courseHoles) {
+  const s = round.scores[pid] || {};
+  const holesData = s.holes || {};
+  const ch = s.courseHandicap ?? 0;
+  const sorted = [...courseHoles].sort((a, b) => a.number - b.number);
+  const perHole = {};
+  sorted.forEach((h) => {
+    const cell = holesData[h.number];
+    const gross = cell && cell.gross !== "" && cell.gross != null ? Number(cell.gross) : null;
+    const strokes = strokesOnHole(ch, h.strokeIndex);
+    let penalties = null;
+    if (cell) {
+      penalties = cell.drivePenalty ? 1 : 0;
+      (cell.extraShots || []).forEach((es) => { if (es.penalty) penalties += 1; });
+    }
+    perHole[h.number] = {
+      par: h.par,
+      gross,
+      rel: gross != null ? gross - h.par : null,
+      net: gross != null ? gross - strokes : null,
+      points: gross != null ? stablefordPoints(gross, h.par, strokes) : null,
+      grossPts: gross != null ? stablefordPoints(gross, h.par, 0) : null,
+      putts: cell && cell.putts !== "" && cell.putts != null ? Number(cell.putts) : null,
+      penalties,
+      club: cell?.club || null,
+      drive: cell?.driveYards ?? null,
+    };
+  });
+  const sumMetric = (holeList, key) => {
+    let total = 0, has = false;
+    holeList.forEach((h) => {
+      const v = perHole[h.number]?.[key];
+      if (v != null) { total += v; has = true; }
+    });
+    return has ? total : null;
+  };
+  const totalsFor = (holeList) => ({
+    gross: sumMetric(holeList, "gross"),
+    rel: sumMetric(holeList, "rel"),
+    net: sumMetric(holeList, "net"),
+    points: sumMetric(holeList, "points"),
+    grossPts: sumMetric(holeList, "grossPts"),
+    putts: sumMetric(holeList, "putts"),
+    penalties: sumMetric(holeList, "penalties"),
+  });
+  const out9 = sorted.slice(0, 9), in9 = sorted.slice(9, 18);
+  return { perHole, totals: { out: totalsFor(out9), in: totalsFor(in9), full: totalsFor(sorted) } };
+}
+function fmtTotal(key, totals) {
+  if (!totals || !(key in totals)) return "";
+  const v = totals[key];
+  if (v == null) return "—";
+  return key === "rel" ? fmtRel(v) : v;
+}
+const lsTh = { textAlign: "center", padding: "5px 5px", fontFamily: sans, fontSize: 10.5, fontWeight: 700, color: C.white, background: C.fairwayDark, whiteSpace: "nowrap" };
+const lsRowLabel = { textAlign: "left", padding: "4px 8px", fontFamily: sans, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.03em", color: C.turf, whiteSpace: "nowrap", position: "sticky", left: 0, background: C.white };
+const lsCell = { textAlign: "center", padding: "4px 4px", fontFamily: mono, fontSize: 11.5, whiteSpace: "nowrap" };
+const lsCellMuted = { ...lsCell, color: C.turf, fontSize: 10.5 };
+const LANDSCAPE_ROWS = [
+  { key: "gross", label: "Score", render: (h, m) => <ScoreBadgeFilled gross={m.perHole[h.number]?.gross} par={h.par} /> },
+  { key: "rel", label: "+/-", render: (h, m) => fmtRel(m.perHole[h.number]?.rel) },
+  { key: "net", label: "Net score", render: (h, m) => m.perHole[h.number]?.net ?? "—" },
+  { key: "points", label: "Points", render: (h, m) => m.perHole[h.number]?.points ?? "—" },
+  { key: "grossPts", label: "Gross pts", render: (h, m) => m.perHole[h.number]?.grossPts ?? "—" },
+  { key: "putts", label: "Putts", render: (h, m) => m.perHole[h.number]?.putts ?? "—" },
+  { key: "penalties", label: "Penalties", render: (h, m) => (m.perHole[h.number]?.penalties ? m.perHole[h.number].penalties : "—") },
+  { key: "club", label: "Club", render: (h, m) => m.perHole[h.number]?.club || "—" },
+  {
+    key: "drive", label: "Drive", render: (h, m, distanceUnit) => {
+      const d = m.perHole[h.number]?.drive;
+      return d != null ? `${Math.round(displayDistance(d, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : "—";
+    },
+  },
+];
+function LandscapeScorecard({ round, players, courseHoles, distanceUnit, onOpenStats }) {
+  const sorted = [...courseHoles].sort((a, b) => a.number - b.number);
+  const chunks = chunkHoles(sorted, 9);
+  const metricsByPid = {};
+  round.playerIds.forEach((pid) => { metricsByPid[pid] = computePlayerHoleMetrics(round, pid, courseHoles); });
+  if (!chunks.length) return null;
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      {chunks.map((chunk, ci) => {
+        const label = chunks.length > 1 ? (ci === 0 ? "Out" : ci === 1 ? "In" : `Nine ${ci + 1}`) : null;
+        const totalsKey = ci === 0 ? "out" : ci === 1 ? "in" : "full";
+        const colCount = chunk.length + (label ? 3 : 1);
+        return (
+          <div key={ci} style={{ overflowX: "auto", minWidth: 0, border: `1px solid ${C.line}`, borderRadius: 8 }}>
+            <table style={{ borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  <th style={{ ...lsTh, textAlign: "left", position: "sticky", left: 0 }}>Hole</th>
+                  {chunk.map((h) => <th key={h.number} style={lsTh}>{h.number}</th>)}
+                  {label && <th style={lsTh}>{label}</th>}
+                  {label && <th style={lsTh}>Tot</th>}
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td style={lsRowLabel}>Hcp</td>
+                  {chunk.map((h) => <td key={h.number} style={lsCellMuted}>{h.strokeIndex ?? "—"}</td>)}
+                  {label && <td style={lsCellMuted} />}
+                  {label && <td style={lsCellMuted} />}
+                </tr>
+                <tr>
+                  <td style={lsRowLabel}>Par</td>
+                  {chunk.map((h) => <td key={h.number} style={lsCell}>{h.par}</td>)}
+                  {label && <td style={{ ...lsCell, fontWeight: 700 }}>{chunk.reduce((sum, h) => sum + (Number(h.par) || 0), 0)}</td>}
+                  {label && <td style={{ ...lsCell, fontWeight: 700 }}>{sorted.reduce((sum, h) => sum + (Number(h.par) || 0), 0)}</td>}
+                </tr>
+                {round.playerIds.map((pid) => {
+                  const player = players.find((p) => p.id === pid);
+                  const m = metricsByPid[pid];
+                  const halfTotals = m.totals[totalsKey];
+                  const fullTotals = m.totals.full;
+                  return (
+                    <React.Fragment key={pid}>
+                      <tr>
+                        <td colSpan={colCount} style={{ padding: "8px 8px 4px", background: C.paper2, position: "sticky", left: 0 }}>
+                          <span style={{ fontFamily: serif, fontSize: 13, fontWeight: 700, color: C.fairway }}>{player?.name || "?"}</span>
+                          <button
+                            onClick={() => onOpenStats(pid)}
+                            style={{ marginLeft: 10, background: C.fairway, color: C.white, border: "none", borderRadius: 4, padding: "2px 8px", fontFamily: sans, fontSize: 10.5, fontWeight: 700, cursor: "pointer" }}
+                          >
+                            📊 Stats
+                          </button>
+                        </td>
+                      </tr>
+                      {LANDSCAPE_ROWS.map((rd) => (
+                        <tr key={rd.key}>
+                          <td style={lsRowLabel}>{rd.label}</td>
+                          {chunk.map((h) => <td key={h.number} style={lsCell}>{rd.render(h, m, distanceUnit)}</td>)}
+                          {label && <td style={{ ...lsCell, fontWeight: 700 }}>{fmtTotal(rd.key, halfTotals)}</td>}
+                          {label && <td style={{ ...lsCell, fontWeight: 700 }}>{fmtTotal(rd.key, fullTotals)}</td>}
+                        </tr>
+                      ))}
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function RoundDetailStroke({ round, players, course, courseHoles, distanceUnit }) {
   /* holds the pid whose Stats drawer is open, null = closed — same "one nullable state var,
      modal owns no visibility of its own" convention as PenaltyPickerModal/DriveMapModal use
      elsewhere in this file (19 Aug, Stats drawer). */
   const [statsFor, setStatsFor] = useState(null);
+  /* Landscape gets the wide detail table (LandscapeScorecard) instead of the portrait compact
+     scorecard — there's finally enough width for club/drive/putts/penalties per hole without
+     forcing a horizontal scroll on every row (19 Aug, per the user's rotate-to-see-detail
+     request). Same Stats-drawer modal either way, just triggered from a different button. */
+  const orientation = useOrientation();
+  if (orientation === "landscape") {
+    return (
+      <div style={{ minWidth: 0 }}>
+        <LandscapeScorecard round={round} players={players} courseHoles={courseHoles} distanceUnit={distanceUnit} onOpenStats={setStatsFor} />
+        {statsFor && (
+          <StrokeRoundStatsModal
+            round={round}
+            player={players.find((p) => p.id === statsFor)}
+            course={course}
+            courseHoles={courseHoles}
+            onClose={() => setStatsFor(null)}
+          />
+        )}
+      </div>
+    );
+  }
   return (
     <div style={{ display: "grid", gap: 16 }}>
       {round.playerIds.map((pid) => {
