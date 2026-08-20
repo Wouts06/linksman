@@ -5226,7 +5226,7 @@ function LandscapeScorecard({ round, players, courseHoles, distanceUnit, onOpenS
         const colCount = chunk.length + (label ? 3 : 1);
         return (
           <div key={ci} style={{ overflowX: "auto", minWidth: 0, border: `1px solid ${C.line}`, borderRadius: 8 }}>
-            <table style={{ borderCollapse: "collapse" }}>
+            <table style={{ borderCollapse: "collapse", width: "100%", minWidth: "100%" }}>
               <thead>
                 <tr>
                   <th style={{ ...lsTh, textAlign: "left", position: "sticky", left: 0 }}>Hole</th>
