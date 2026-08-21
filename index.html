@@ -4,6 +4,24 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
     <title>Linksman — Golf Scorer</title>
+
+    <!-- App icon (21 Aug) — a flag-and-green mark in the app's own fairway-green/brass palette.
+         favicon.svg is listed first since modern browsers prefer a crisp vector favicon over the
+         .ico fallback (which still needs to exist for older browsers/OS chrome that don't support
+         svg favicons); the PNG set below covers iOS "Add to Home Screen" (apple-touch-icon, which
+         iOS masks itself — no rounding baked into the source) and, via manifest.json, Android's
+         "Add to Home Screen"/PWA install icon. theme-color tints Android's Chrome UI (status bar,
+         task-switcher card) to match the app instead of leaving it default white. -->
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" href="/favicon-32x32.png" sizes="32x32" type="image/png" />
+    <link rel="icon" href="/favicon-16x16.png" sizes="16x16" type="image/png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#1E3A2B" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Linksman" />
     <!-- Every button in the app (btnPrimary/btnGhost in App.jsx) sets cursor:"pointer"
          unconditionally, including when the `disabled` attribute is set — so a disabled button
          previously looked and felt exactly like a clickable one (no dimming, still a pointer

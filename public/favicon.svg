@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#24493A"/>
+      <stop offset="100%" stop-color="#152A20"/>
+    </linearGradient>
+  </defs>
+
+  <!-- full-bleed background: safe for Android adaptive/maskable icon masking -->
+  <rect width="512" height="512" fill="url(#bg)"/>
+
+  <!-- green mound the pin sits in — single flat shape, stays legible at 16px -->
+  <ellipse cx="256" cy="380" rx="150" ry="34" fill="#5C8A63"/>
+
+  <!-- hole -->
+  <ellipse cx="256" cy="378" rx="30" ry="12" fill="#152A20"/>
+
+  <!-- flagstick — thickened so it doesn't disappear at favicon size -->
+  <rect x="246" y="108" width="20" height="272" rx="8" fill="#FBF9F2"/>
+
+  <!-- flag — enlarged, bold triangle -->
+  <path d="M 266 118 L 266 226 L 396 172 Z" fill="#C9A227"/>
+</svg>
