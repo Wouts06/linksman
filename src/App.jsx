@@ -3721,12 +3721,31 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
               <RangefinderNote playsAsYards={rangefinder.playsAsYards} distanceUnit={distanceUnit} />
             </div>
           )}
-          {suggestion && <div style={{ color: C.fairway }}>🎒 {suggestion}</div>}
-          {hole.greenLat != null && (
-            <button style={{ ...btnGhost, fontSize: 13.5, padding: "0 10px", marginTop: 4, width: 150, height: 42, boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
-          )}
         </div>
       </div>
+
+      {/* club suggestion + View green — own full-width row, left-aligned (25 Sep, per explicit
+          report: "the club suggestion... is getting lost on the right between those metrics"
+          and "the bag icon... is taking away from the esthetics"). Moved out of the cramped
+          right-aligned metrics column above so it reads clearly, and swapped the 🎒 emoji for
+          the user-supplied circular bag-badge SVG (public/golf-bag.svg, served at the site
+          root same as favicon.svg). View green keeps its old size/position, just now sharing
+          this row instead of stacking under the suggestion. */}
+      {(suggestion || hole.greenLat != null) && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, gap: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+            {suggestion && (
+              <>
+                <img src="/golf-bag.svg" alt="" width={44} height={44} style={{ flexShrink: 0 }} />
+                <span style={{ fontFamily: sans, fontSize: 19, fontWeight: 700, color: C.ink }}>{suggestion}</span>
+              </>
+            )}
+          </div>
+          {hole.greenLat != null && (
+            <button style={{ ...btnGhost, fontSize: 13.5, padding: "0 10px", width: 150, height: 42, boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
+          )}
+        </div>
+      )}
 
       {showGreenView && (
         <GreenViewModal
