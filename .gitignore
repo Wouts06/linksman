@@ -17,3 +17,7 @@ yarn-error.log*
 # env files (never commit secrets)
 .env
 .env.local
+
+# linksman-api deploys straight to InterWorx hosting, not through git/Vercel —
+# config.php holds real DB credentials and must never be committed
+linksman-api/config.php

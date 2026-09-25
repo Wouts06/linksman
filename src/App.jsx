@@ -55,6 +55,72 @@ function saveKey(key, value) {
   }
 }
 
+/* ---------- server sync (25 Sep) ----------
+   The app's data used to live only in the browser's localStorage. It now also has an
+   optional account layer: a small PHP API (see /linksman-api in the repo root, deployed
+   separately to tarakona.co.za — NOT part of this Vite app's own build/deploy) backed by
+   MySQL. localStorage stays the source of truth for rendering (every existing loadKey/
+   saveKey call throughout the app is untouched), but when a user is logged in, the exact
+   same golf:* values also get pushed to/pulled from the server, keyed to their account.
+   Change this to wherever you actually upload the linksman-api folder on your hosting. */
+const API_BASE = "https://tarakona.co.za/linksman-api";
+/* the only data_key values the server accepts — must match $ALLOWED_KEYS in data.php */
+const SYNCED_KEYS = ["courses", "players", "rounds", "settings", "mePlayerId", "rangefinderDefault"];
+
+/* Pulls this account's data from the server and writes it into localStorage under the
+   matching golf:* keys (server wins for any key it has a value for), then pushes up
+   anything that's only present locally (server has no row for that key yet — e.g. a
+   brand-new account, or a key that predates this device's last sync). Returns
+   {ok:true} on success, or {ok:false, status} — status 401 means the token itself is
+   bad/expired (caller should log out); any other failure (network down, server
+   unreachable on the course, etc.) is NOT a reason to log someone out, so callers should
+   just carry on with whatever's already in localStorage. */
+async function syncWithServer(token) {
+  try {
+    const res = await fetch(`${API_BASE}/data.php`, { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) return { ok: false, status: res.status };
+    const serverData = await res.json();
+    const seedItems = [];
+    SYNCED_KEYS.forEach((key) => {
+      const golfKey = `golf:${key}`;
+      if (Object.prototype.hasOwnProperty.call(serverData, key)) {
+        saveKey(golfKey, serverData[key]);
+      } else {
+        const local = loadKey(golfKey, undefined);
+        const isEmpty = local == null || (Array.isArray(local) && local.length === 0);
+        if (!isEmpty) seedItems.push({ key, value: local });
+      }
+    });
+    if (seedItems.length) {
+      await fetch(`${API_BASE}/data.php`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ items: seedItems }),
+      });
+    }
+    return { ok: true };
+  } catch (e) {
+    console.error("server sync failed", e);
+    return { ok: false, networkError: true };
+  }
+}
+
+/* Fire-and-forget push of one changed key to the server — called from the setCourses/
+   setPlayers/etc. wrappers in App() right after they save to localStorage as usual.
+   Silently no-ops when logged out (tokenRef.current is null) and silently swallows
+   network errors (a missed background sync isn't worth interrupting someone's round
+   over — the local save already succeeded, and the next successful sync/login will
+   reconcile things). */
+function pushToServer(tokenRef, key, value) {
+  const token = tokenRef.current;
+  if (!token) return;
+  fetch(`${API_BASE}/data.php`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ key, value }),
+  }).catch((e) => console.error("background sync failed for", key, e));
+}
+
 /* ---------- golf math ---------- */
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -5936,6 +6002,102 @@ function HistoryTab({ rounds, players, courses, distanceUnit }) {
 }
 
 /* ================= APP ================= */
+/* Login/create-account screen (25 Sep) — shown instead of the main app whenever nobody's
+   logged in yet. Talks directly to register.php/login.php; onAuthed hands the resulting
+   {token, user} back up to App(), which is responsible for saving it and syncing data. */
+function AuthGate({ onAuthed }) {
+  const [mode, setMode] = useState("login"); // "login" | "register"
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(e) {
+    e.preventDefault();
+    setError("");
+    if (!email.trim() || !password) { setError("Email and password are required."); return; }
+    if (mode === "register" && !name.trim()) { setError("Please enter your name."); return; }
+    setBusy(true);
+    try {
+      const res = await fetch(`${API_BASE}/${mode === "login" ? "login.php" : "register.php"}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(mode === "login" ? { email, password } : { email, password, name }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(body?.error || "Something went wrong — please try again.");
+        setBusy(false);
+        return;
+      }
+      onAuthed(body.token, body.user);
+    } catch (e2) {
+      setError("Couldn't reach the server. Check your connection and try again.");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={{ minHeight: "100vh", background: C.paper, fontFamily: sans, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <div style={{ width: "100%", maxWidth: 360 }}>
+        <div style={{ textAlign: "center", marginBottom: 22 }}>
+          <div style={{ fontFamily: serif, fontSize: 30, color: C.fairway }}>Linksman</div>
+          <div style={{ fontFamily: sans, fontSize: 13, color: C.turf, marginTop: 2 }}>Sign in to sync your rounds across devices</div>
+        </div>
+
+        <div style={{ display: "flex", gap: 2, background: C.paper2, borderRadius: 6, padding: 3, marginBottom: 18 }}>
+          {[["login", "Log in"], ["register", "Create account"]].map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => { setMode(key); setError(""); }}
+              style={{
+                flex: 1, fontFamily: sans, fontSize: 13.5, fontWeight: 700, padding: "9px 8px", borderRadius: 5, border: "none", cursor: "pointer",
+                background: mode === key ? C.white : "transparent",
+                color: mode === key ? C.fairway : C.turf,
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <form onSubmit={submit} style={{ display: "grid", gap: 10 }}>
+          {mode === "register" && (
+            <input style={inputStyle} placeholder="Your name" value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" />
+          )}
+          <input style={inputStyle} type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" />
+          <input style={inputStyle} type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={mode === "login" ? "current-password" : "new-password"} />
+          {mode === "register" && (
+            <div style={{ fontFamily: sans, fontSize: 11.5, color: C.turf }}>At least 8 characters.</div>
+          )}
+          {error && (
+            <div style={{ fontFamily: sans, fontSize: 13, color: C.flag, background: "rgba(178,58,46,0.08)", border: `1px solid ${C.flag}`, borderRadius: 5, padding: "8px 10px" }}>{error}</div>
+          )}
+          <button type="submit" disabled={busy} style={{ ...btnPrimary, width: "100%", boxSizing: "border-box", marginTop: 4 }}>
+            {busy ? "Please wait…" : mode === "login" ? "Log in" : "Create account"}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+/* Small account panel (25 Sep) — opened from the header's account chip once logged in.
+   Just shows who's signed in and offers to log out; there's nothing else to manage yet. */
+function AccountModal({ user, onClose, onLogout }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(20,20,16,0.55)", zIndex: 1100, display: "flex", alignItems: "center", justifyContent: "center", padding: 14 }} onClick={onClose}>
+      <div style={{ background: C.paper, borderRadius: 10, padding: 20, width: "100%", maxWidth: 300 }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ fontFamily: serif, fontSize: 17, color: C.fairway, marginBottom: 2 }}>{user?.name || "Account"}</div>
+        <div style={{ fontFamily: sans, fontSize: 13, color: C.turf, marginBottom: 16, overflowWrap: "anywhere" }}>{user?.email}</div>
+        <button style={{ ...btnGhost, width: "100%", boxSizing: "border-box", borderColor: C.flag, color: C.flag }} onClick={onLogout}>Log out</button>
+        <button style={{ ...btnGhost, width: "100%", boxSizing: "border-box", marginTop: 8 }} onClick={onClose}>Close</button>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [tab, setTab] = useState("play");
   const [courses, setCoursesState] = useState([]);
@@ -5953,9 +6115,61 @@ export default function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   const compact = tab === "play" && !!activeRound;
 
+  /* ---- account / server sync (25 Sep) ----
+     authUser is null until someone's logged in, which gates the whole app behind
+     AuthGate below (see the `if (!authUser)` return). The token itself lives only in
+     a ref, never state — it doesn't need to trigger re-renders, and keeping it out of
+     the setCourses/setPlayers/etc. closures below (which are useCallback'd with `[]`
+     so their identity stays stable) means those closures can read "whatever the
+     current token is" via the ref without needing authToken in their dependency
+     array. authUser (id/email/name — safe to show in the UI) IS state, since the
+     account chip in the header needs to re-render when it changes. */
+  const [authUser, setAuthUserState] = useState(null);
+  const authTokenRef = useRef(null);
+  const [accountOpen, setAccountOpen] = useState(false);
+
   useEffect(() => { if (!compact) setMenuOpen(false); }, [compact]);
 
   useEffect(() => {
+    (async () => {
+      const token = loadKey("golf:authToken", null);
+      const user = loadKey("golf:authUser", null);
+      if (token && user) {
+        const result = await syncWithServer(token);
+        if (result.ok) {
+          authTokenRef.current = token;
+          setAuthUserState(user);
+        } else if (result.status === 401) {
+          // the session itself is bad/expired — drop it and fall back to AuthGate.
+          // Any other failure (offline, server unreachable) is NOT treated as a
+          // logout: someone standing on the 14th hole with no signal should still
+          // be able to keep scoring using whatever's already in localStorage.
+          saveKey("golf:authToken", null);
+          saveKey("golf:authUser", null);
+        } else {
+          authTokenRef.current = token;
+          setAuthUserState(user);
+        }
+      }
+      setCoursesState(loadKey("golf:courses", []));
+      setPlayersState(loadKey("golf:players", []));
+      setRoundsState(loadKey("golf:rounds", []));
+      const settings = loadKey("golf:settings", { distanceUnit: "yd", voiceWakeWord: "" });
+      setDistanceUnitState(settings?.distanceUnit === "m" ? "m" : "yd");
+      setVoiceWakeWordState(typeof settings?.voiceWakeWord === "string" ? settings.voiceWakeWord : "");
+      setMePlayerIdState(loadKey("golf:mePlayerId", null));
+      setLoaded(true);
+    })();
+  }, []);
+
+  /* handed to AuthGate as onAuthed, and reused for the same job when someone logs in
+     from an already-open session isn't possible (AuthGate only renders when logged
+     out) — so this is the one and only place a token gets adopted after login/register. */
+  const handleAuthed = useCallback(async (token, user) => {
+    saveKey("golf:authToken", token);
+    saveKey("golf:authUser", user);
+    authTokenRef.current = token;
+    await syncWithServer(token); // pull any existing server data / seed a brand-new account
     setCoursesState(loadKey("golf:courses", []));
     setPlayersState(loadKey("golf:players", []));
     setRoundsState(loadKey("golf:rounds", []));
@@ -5963,24 +6177,64 @@ export default function App() {
     setDistanceUnitState(settings?.distanceUnit === "m" ? "m" : "yd");
     setVoiceWakeWordState(typeof settings?.voiceWakeWord === "string" ? settings.voiceWakeWord : "");
     setMePlayerIdState(loadKey("golf:mePlayerId", null));
-    setLoaded(true);
+    setAuthUserState(user); // renders the main app now that this is set
+  }, []);
+
+  const logout = useCallback(() => {
+    const token = authTokenRef.current;
+    if (token) {
+      fetch(`${API_BASE}/logout.php`, { method: "POST", headers: { Authorization: `Bearer ${token}` } }).catch(() => {});
+    }
+    authTokenRef.current = null;
+    saveKey("golf:authToken", null);
+    saveKey("golf:authUser", null);
+    // Clear local app data too, so the next account logged into on this device
+    // doesn't briefly see this account's courses/players/rounds before its own
+    // server sync overwrites them.
+    saveKey("golf:courses", []); setCoursesState([]);
+    saveKey("golf:players", []); setPlayersState([]);
+    saveKey("golf:rounds", []); setRoundsState([]);
+    saveKey("golf:mePlayerId", null); setMePlayerIdState(null);
+    saveKey(ACTIVE_ROUND_KEY, null);
+    setAccountOpen(false);
+    setAuthUserState(null);
   }, []);
 
   /* both settings live in the one "golf:settings" object — always read-merge-write so toggling
      one (e.g. the yd/m switch) can never silently wipe out the other */
   const setDistanceUnit = useCallback((u) => {
     setDistanceUnitState(u);
-    saveKey("golf:settings", { ...loadKey("golf:settings", {}), distanceUnit: u });
+    const next = { ...loadKey("golf:settings", {}), distanceUnit: u };
+    saveKey("golf:settings", next);
+    pushToServer(authTokenRef, "settings", next);
   }, []);
   const setVoiceWakeWord = useCallback((w) => {
     setVoiceWakeWordState(w);
-    saveKey("golf:settings", { ...loadKey("golf:settings", {}), voiceWakeWord: w });
+    const next = { ...loadKey("golf:settings", {}), voiceWakeWord: w };
+    saveKey("golf:settings", next);
+    pushToServer(authTokenRef, "settings", next);
   }, []);
-  const setMePlayerId = useCallback((id) => { setMePlayerIdState(id); saveKey("golf:mePlayerId", id); }, []);
+  const setMePlayerId = useCallback((id) => {
+    setMePlayerIdState(id);
+    saveKey("golf:mePlayerId", id);
+    pushToServer(authTokenRef, "mePlayerId", id);
+  }, []);
 
-  const setCourses = useCallback((next) => { setCoursesState(next); saveKey("golf:courses", next); }, []);
-  const setPlayers = useCallback((next) => { setPlayersState(next); saveKey("golf:players", next); }, []);
-  const setRounds = useCallback((next) => { setRoundsState(next); saveKey("golf:rounds", next); }, []);
+  const setCourses = useCallback((next) => {
+    setCoursesState(next);
+    saveKey("golf:courses", next);
+    pushToServer(authTokenRef, "courses", next);
+  }, []);
+  const setPlayers = useCallback((next) => {
+    setPlayersState(next);
+    saveKey("golf:players", next);
+    pushToServer(authTokenRef, "players", next);
+  }, []);
+  const setRounds = useCallback((next) => {
+    setRoundsState(next);
+    saveKey("golf:rounds", next);
+    pushToServer(authTokenRef, "rounds", next);
+  }, []);
 
   const requestLocation = useCallback(() => {
     return new Promise((resolve) => {
@@ -5994,6 +6248,10 @@ export default function App() {
 
   if (!loaded) {
     return <div style={{ padding: 40, fontFamily: sans, color: C.turf }}>Loading…</div>;
+  }
+
+  if (!authUser) {
+    return <AuthGate onAuthed={handleAuthed} />;
   }
 
   return (
@@ -6045,6 +6303,20 @@ export default function App() {
               </button>
             ))}
           </div>
+          {/* account chip (25 Sep) — initial-letter avatar; tapping it opens AccountModal
+              (email + log out). Kept out of `compact` mode's collapse since it's small and
+              there's no real crowding even alongside the hamburger. */}
+          <button
+            onClick={() => setAccountOpen(true)}
+            aria-label="Account"
+            style={{
+              width: 30, height: 30, borderRadius: "50%", flexShrink: 0, border: "1px solid rgba(251,249,242,0.35)",
+              background: "rgba(251,249,242,0.12)", color: C.white, fontFamily: sans, fontSize: 13, fontWeight: 700,
+              cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+            }}
+          >
+            {(authUser?.name || authUser?.email || "?").trim().charAt(0).toUpperCase()}
+          </button>
         </div>
         {/* full tab row collapses to zero height/opacity in compact mode instead of the
             hamburger appearing alongside it — the two visually swap places, "zooming" into
@@ -6065,6 +6337,9 @@ export default function App() {
         {tab === "players" && <PlayersTab players={players} setPlayers={setPlayers} distanceUnit={distanceUnit} mePlayerId={mePlayerId} setMePlayerId={setMePlayerId} voiceWakeWord={voiceWakeWord} setVoiceWakeWord={setVoiceWakeWord} />}
         {tab === "history" && <HistoryTab rounds={rounds} players={players} courses={courses} distanceUnit={distanceUnit} />}
       </div>
+      {accountOpen && (
+        <AccountModal user={authUser} onClose={() => setAccountOpen(false)} onLogout={logout} />
+      )}
     </div>
   );
 }
