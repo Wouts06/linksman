@@ -2000,27 +2000,32 @@ function VoiceCaddyButton({ voiceOn, setVoiceOn, voiceMsg, voiceError, voiceUnma
   );
 }
 
-/* Floating banner offered when the auto shot-stop detector thinks you've walked to your ball
-   and stopped (see shotDetectorStep above) — a one-tap alternative to hunting for the manual
-   "Mark drive"/"Mark shot" button on your own scorecard row while you're standing on the course. */
-function ShotStopPrompt({ hole, onMark, onDismiss }) {
+/* Small pulsing "!" badge offered when the auto shot-stop detector thinks you've walked to your
+   ball and stopped (see shotDetectorStep above) — sits on the corner of whichever button
+   ("Mark drive"/"Mark shot") would record that exact shot, as a one-tap alternative to hunting
+   for it, without blocking the view of the screen. Replaced an earlier floating banner (25 Sep,
+   per explicit user feedback: "hindering when you are just simply viewing the app or standing
+   prepping for your next shot") that sat fixed over the bottom of the screen at all times while
+   a shot was pending. The badge needs no dismiss action of its own — it disappears the moment
+   the shot is actually marked (myPending's anchor changes, which resets the detector for the
+   new anchor) or the golfer moves again. Purely decorative/pointer-events:none — the existing
+   Mark button underneath it is still what actually gets tapped, and already pre-fills from the
+   live GPS position (see markDriveForStroke/markNextShotForStroke/markDriveForBB/
+   markNextShotForBB), which is effectively the same spot the detector just stopped at. */
+function ShotAlertBadge() {
   return (
-    <div
+    <span
+      aria-hidden="true"
       style={{
-        position: "fixed", left: 14, right: 14, bottom: 14, zIndex: 900, maxWidth: 480, margin: "0 auto",
-        background: C.fairway, color: C.white, borderRadius: 10, padding: "12px 14px",
-        boxShadow: "0 4px 18px rgba(0,0,0,0.35)", display: "flex", justifyContent: "space-between",
-        alignItems: "center", gap: 10, flexWrap: "wrap",
+        position: "absolute", top: -7, right: -7, width: 18, height: 18, borderRadius: "50%",
+        background: C.flag, color: C.white, fontFamily: sans, fontWeight: 800, fontSize: 12,
+        display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1,
+        boxShadow: `0 0 0 2px ${C.white}`, animation: "shotAlertPulse 1.4s ease-in-out infinite",
+        pointerEvents: "none", zIndex: 2,
       }}
     >
-      <div style={{ fontFamily: sans, fontSize: 13 }}>
-        Looks like you've stopped on hole {hole.number} — mark your shot here?
-      </div>
-      <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
-        <button onClick={onDismiss} style={{ ...btnGhost, borderColor: "rgba(251,249,242,0.6)", color: C.white, fontSize: 12, padding: "7px 12px" }}>Not now</button>
-        <button onClick={onMark} style={{ ...btnPrimary, background: C.brass, color: C.fairwayDark, fontSize: 12, padding: "7px 14px" }}>📍 Mark it</button>
-      </div>
-    </div>
+      !
+    </span>
   );
 }
 
@@ -3184,16 +3189,25 @@ function PenaltyPickerModal({ title, value, onSelect, onClose }) {
     </div>
   );
 }
-function PenaltyBadgeButton({ value, onClick, label = "+ Penalty" }) {
+/* `style` lets call sites override width/padding/fontSize for the handful of spots where the
+   badge sits inline in a tight row (an extra shot's club select, a Better Ball round>0 line)
+   instead of its own full-width row — base defaults (25 Sep, per explicit report: "the penalty
+   buttons are still resizing all over the place") are a FIXED width/height matching the primary
+   Mark drive/+Next shot buttons, so the badge's box no longer grows/shrinks with its own label
+   text ("+ Penalty (drive)" vs "⚠ OB" etc.) — only the text itself truncates (ellipsis) if it
+   ever doesn't fit. */
+function PenaltyBadgeButton({ value, onClick, label = "+ Penalty", style }) {
   return (
     <button
       onClick={onClick}
       style={{
-        fontSize: 11.5, fontFamily: sans, fontWeight: 700, padding: "8px 11px", borderRadius: 5, cursor: "pointer",
+        fontSize: 12.5, fontFamily: sans, fontWeight: 700, padding: "10px 8px", borderRadius: 5, cursor: "pointer",
         border: `1px solid ${value ? C.flag : C.line}`,
         background: value ? C.flag : C.white,
         color: value ? C.white : C.turf,
-        flexShrink: 0, whiteSpace: "nowrap",
+        width: "100%", boxSizing: "border-box",
+        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        ...style,
       }}
     >
       {value ? `⚠ ${value}` : label}
@@ -3201,7 +3215,7 @@ function PenaltyBadgeButton({ value, onClick, label = "+ Penalty" }) {
   );
 }
 
-function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, playerBName, playerAId, playerBId, state, onUpdate, onMarkDrive, onMarkShot, livePos, distanceUnit, mePlayerId, meBag, course, teeAssign, greenTarget = "back", rangefinderPlaysAsYards }) {
+function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, playerBName, playerAId, playerBId, state, onUpdate, onMarkDrive, onMarkShot, livePos, distanceUnit, mePlayerId, meBag, course, teeAssign, greenTarget = "back", rangefinderPlaysAsYards, alert }) {
   const s = state || defaultBBHole();
   const [puttPickerFor, setPuttPickerFor] = useState(null); // null | "A" | "B"
   const [penaltyTarget, setPenaltyTarget] = useState(null); // null | { roundIdx, who: "A"|"B"|null }
@@ -3296,9 +3310,12 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
                       )}
                       <ShapeSelector par={hole.par} value={r.shapeA} onChange={(v) => patchRound(i, { shapeA: v })} />
                       {hole.teeLat != null && (
-                        <button style={{ ...btnGhost, fontSize: 11.5, padding: "8px 8px", marginTop: 6 }} onClick={() => onMarkDrive && onMarkDrive("A")}>
-                          {r.driveYardsA ? `📍 ${Math.round(displayDistance(r.driveYardsA, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : "📍 Mark"}
-                        </button>
+                        <div style={{ position: "relative", display: "inline-block", marginTop: 6 }}>
+                          <button style={{ ...btnGhost, fontSize: 11.5, padding: "8px 8px" }} onClick={() => onMarkDrive && onMarkDrive("A")}>
+                            {r.driveYardsA ? `📍 ${Math.round(displayDistance(r.driveYardsA, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : "📍 Mark"}
+                          </button>
+                          {alert && alert.isDrive && alert.who === "A" && <ShotAlertBadge />}
+                        </div>
                       )}
                       <select style={{ ...inputStyle, width: 96, padding: "7px 4px", fontSize: 12, marginTop: 6 }} value={r.clubA || ""} onChange={(e) => patchRound(i, { clubA: e.target.value || null })}>
                         <option value="">Club —</option>
@@ -3323,9 +3340,12 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
                       )}
                       <ShapeSelector par={hole.par} value={r.shapeB} onChange={(v) => patchRound(i, { shapeB: v })} />
                       {hole.teeLat != null && (
-                        <button style={{ ...btnGhost, fontSize: 11.5, padding: "8px 8px", marginTop: 6 }} onClick={() => onMarkDrive && onMarkDrive("B")}>
-                          {r.driveYardsB ? `📍 ${Math.round(displayDistance(r.driveYardsB, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : "📍 Mark"}
-                        </button>
+                        <div style={{ position: "relative", display: "inline-block", marginTop: 6 }}>
+                          <button style={{ ...btnGhost, fontSize: 11.5, padding: "8px 8px" }} onClick={() => onMarkDrive && onMarkDrive("B")}>
+                            {r.driveYardsB ? `📍 ${Math.round(displayDistance(r.driveYardsB, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : "📍 Mark"}
+                          </button>
+                          {alert && alert.isDrive && alert.who === "B" && <ShotAlertBadge />}
+                        </div>
                       )}
                       <select style={{ ...inputStyle, width: 96, padding: "7px 4px", fontSize: 12, marginTop: 6 }} value={r.clubB || ""} onChange={(e) => patchRound(i, { clubB: e.target.value || null })}>
                         <option value="">Club —</option>
@@ -3349,9 +3369,12 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
                     <div style={{ marginBottom: 4, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                       <span style={{ color: C.turf }}>{hitName}:</span>
                       {hole.teeLat != null && (
-                        <button style={{ ...btnGhost, fontSize: 11.5, padding: "8px 8px" }} onClick={() => onMarkShot && onMarkShot(whoHit, i)}>
-                          {r.shotYards != null ? `📍 ${Math.round(displayDistance(r.shotYards, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : "📍 Mark shot"}
-                        </button>
+                        <div style={{ position: "relative", display: "inline-block" }}>
+                          <button style={{ ...btnGhost, fontSize: 11.5, padding: "8px 8px" }} onClick={() => onMarkShot && onMarkShot(whoHit, i)}>
+                            {r.shotYards != null ? `📍 ${Math.round(displayDistance(r.shotYards, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : "📍 Mark shot"}
+                          </button>
+                          {alert && !alert.isDrive && alert.roundIndex === i && alert.who === whoHit && <ShotAlertBadge />}
+                        </div>
                       )}
                       <select style={{ ...inputStyle, width: 96, padding: "7px 4px", fontSize: 12 }} value={r.club || ""} onChange={(e) => patchRound(i, { club: e.target.value || null })}>
                         <option value="">Club —</option>
@@ -3360,7 +3383,7 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
                       {hitId === mePlayerId && suggestionForApproach && !r.club && (
                         <span style={{ fontSize: 10, color: C.fairway, fontWeight: 700 }}>🎒 {suggestionForApproach}?</span>
                       )}
-                      <PenaltyBadgeButton value={r.penalty} onClick={() => setPenaltyTarget({ roundIdx: i, who: null })} />
+                      <PenaltyBadgeButton value={r.penalty} onClick={() => setPenaltyTarget({ roundIdx: i, who: null })} style={{ width: 108, flexShrink: 0, padding: "8px 8px", fontSize: 11 }} />
                     </div>
                   );
                 })()}
@@ -3555,6 +3578,7 @@ function HoleDataCluster({ hole, distanceUnit, unitLabel }) {
 function BetterBallFocusedHole({
   hole, isLast, solo, pA1, pB1, pA2, pB2, team1Ids, team2Ids, bbState, distanceUnit, livePos,
   mePlayerId, mePlayer, course, teeAssign, greenTarget = "back", rangefinderEnabled, onSetGreenTarget, onUpdateTeam1, onUpdateTeam2, onMarkDrive1, onMarkShot1, onMarkDrive2, onMarkShot2, onNext,
+  alertTeamKey, alertWho, alertIsDrive, alertRoundIndex,
 }) {
   const [showGreenView, setShowGreenView] = useState(false);
   const aimGreen = livePos ? greenAimPoint(livePos.lat, livePos.lon, hole, greenTarget) : null;
@@ -3602,14 +3626,16 @@ function BetterBallFocusedHole({
           state={bbState.team1?.[hole.number]} onUpdate={onUpdateTeam1}
           onMarkDrive={onMarkDrive1} onMarkShot={onMarkShot1}
           livePos={livePos} distanceUnit={distanceUnit} mePlayerId={mePlayerId} meBag={mePlayer?.bag}
-          course={course} teeAssign={teeAssign} greenTarget={greenTarget} rangefinderPlaysAsYards={rangefinder.playsAsYards} />
+          course={course} teeAssign={teeAssign} greenTarget={greenTarget} rangefinderPlaysAsYards={rangefinder.playsAsYards}
+          alert={alertTeamKey === "team1" ? { who: alertWho, isDrive: alertIsDrive, roundIndex: alertRoundIndex } : null} />
         {!solo && (
           <BetterBallHoleCard hole={hole} teamKey="team2" teamColor={C.team2} teamLabel="Team 2" playerAName={pA2?.name || "A"} playerBName={pB2?.name || "B"}
             playerAId={team2Ids[0]} playerBId={team2Ids[1]}
             state={bbState.team2?.[hole.number]} onUpdate={onUpdateTeam2}
             onMarkDrive={onMarkDrive2} onMarkShot={onMarkShot2}
             livePos={livePos} distanceUnit={distanceUnit} mePlayerId={mePlayerId} meBag={mePlayer?.bag}
-            course={course} teeAssign={teeAssign} greenTarget={greenTarget} rangefinderPlaysAsYards={rangefinder.playsAsYards} />
+            course={course} teeAssign={teeAssign} greenTarget={greenTarget} rangefinderPlaysAsYards={rangefinder.playsAsYards}
+            alert={alertTeamKey === "team2" ? { who: alertWho, isDrive: alertIsDrive, roundIndex: alertRoundIndex } : null} />
         )}
       </div>
 
@@ -3623,7 +3649,7 @@ function BetterBallFocusedHole({
 /* single "focused" hole in the per-hole stroke-play scoring view — occupies most of the
    screen while active; one compact card per selected player inside it. Direction/putts and
    shot-marking sit side by side as equal-width flex columns so neither overflows the card. */
-function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit, livePos, mePlayer, course, teeAssign, greenTarget = "back", rangefinderEnabled, onSetGreenTarget, onScoreField, onMarkDrive, onMarkNextShot, onNext }) {
+function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit, livePos, mePlayer, course, teeAssign, greenTarget = "back", rangefinderEnabled, onSetGreenTarget, onScoreField, onMarkDrive, onMarkNextShot, onNext, alertPid, alertIsDrive }) {
   const [puttPickerForPid, setPuttPickerForPid] = useState(null); // 15 Aug — same tap-only picker as Better Ball, applied here too
   const [penaltyTarget, setPenaltyTarget] = useState(null); // null | { pid, kind: "drive" } | { pid, kind: "extra", idx }
   const [showGreenView, setShowGreenView] = useState(false);
@@ -3753,9 +3779,12 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.03em", color: C.turf, fontFamily: sans, marginBottom: 3 }}>Shots</div>
                   {hole.teeLat != null && (
-                    <button style={{ ...btnGhost, fontSize: 12.5, padding: "10px 8px", width: "100%", boxSizing: "border-box" }} onClick={() => onMarkDrive(pid)}>
-                      {cell.driveYards ? `📍 ${Math.round(displayDistance(cell.driveYards, distanceUnit))}${unitLabel}` : "📍 Mark drive"}
-                    </button>
+                    <div style={{ position: "relative" }}>
+                      <button style={{ ...btnGhost, fontSize: 12.5, padding: "10px 8px", width: "100%", boxSizing: "border-box" }} onClick={() => onMarkDrive(pid)}>
+                        {cell.driveYards ? `📍 ${Math.round(displayDistance(cell.driveYards, distanceUnit))}${unitLabel}` : "📍 Mark drive"}
+                      </button>
+                      {alertPid === pid && alertIsDrive && <ShotAlertBadge />}
+                    </div>
                   )}
                   <select
                     style={{ ...inputStyle, width: "100%", boxSizing: "border-box", padding: "9px 6px", fontSize: 13, marginTop: 6 }}
@@ -3793,13 +3822,25 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
                         value={es.penalty}
                         label={`+ Penalty (S${i + 2})`}
                         onClick={() => setPenaltyTarget({ pid, kind: "extra", idx: i })}
+                        style={{ width: 108, flexShrink: 0, padding: "8px 8px", fontSize: 11 }}
                       />
                     </div>
                   ))}
-                  {hole.teeLat != null && (
-                    <button style={{ ...btnGhost, fontSize: 12.5, padding: "10px 8px", marginTop: 6, width: "100%", boxSizing: "border-box" }} onClick={() => onMarkNextShot(pid)}>
-                      + Next shot
-                    </button>
+                  {/* gated on the drive already being marked (25 Sep, per explicit report: "if I
+                      click +Next shot it prompts me to mark my position at that point as well" —
+                      i.e. it looked like a redundant duplicate of Mark drive). Mark drive records
+                      shot 1's own distance/club fields; +Next shot records shot 2 onward into
+                      extraShots, anchored from the drive (or, previously, straight from the tee
+                      if no drive existed yet — which silently mislabeled that first shot "S2"
+                      instead of ever using the drive fields). Hiding it until there's a drive to
+                      anchor from removes the apparent redundancy and that mislabeling. */}
+                  {hole.teeLat != null && cell.driveLat != null && (
+                    <div style={{ position: "relative", marginTop: 6 }}>
+                      <button style={{ ...btnGhost, fontSize: 12.5, padding: "10px 8px", width: "100%", boxSizing: "border-box" }} onClick={() => onMarkNextShot(pid)}>
+                        + Next shot
+                      </button>
+                      {alertPid === pid && !alertIsDrive && <ShotAlertBadge />}
+                    </div>
                   )}
                 </div>
               </div>
@@ -4035,7 +4076,7 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
      freshly-read values in — including greenTargetRef.current (see the voice-caddy call sites
      below) rather than relying on the component's current-render `greenTarget` state, which that
      particular closure would otherwise never see update. Every other caller (defined fresh each
-     render, e.g. markDriveForStroke/openAutoShotModal) just passes the live `greenTarget` state. */
+     render, e.g. markDriveForStroke/markDriveForBB) just passes the live `greenTarget` state. */
   function recordStrokeDrive(pid, hole, pos, greenTarget = "back") {
     let result = null;
     setScores((prev) => {
@@ -4257,29 +4298,6 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
     ? computePendingShot({ hole: currentHoleForMe, format, mePlayerId, selected, scores, bbState, team1Ids, team2Ids, greenTarget })
     : null;
   const shotDetector = useShotStopDetector(step === "scoring" && !!myPending, livePos, myPending?.anchor || null);
-
-  function openAutoShotModal(pending, pos) {
-    const label = mePlayer?.name || "You";
-    setDriveModal({
-      hole: pending.hole,
-      label,
-      shotLabel: pending.isDrive ? "drive" : "next shot",
-      fromLat: pending.anchor?.lat,
-      fromLon: pending.anchor?.lon,
-      initialPos: { lat: pos.lat, lng: pos.lon },
-      onSave: (yd, lat, lng) => {
-        const posArg = { lat, lon: lng };
-        const result = pending.kind === "stroke"
-          ? pending.isDrive ? recordStrokeDrive(mePlayerId, pending.hole, posArg, greenTarget) : recordStrokeNextShot(mePlayerId, pending.hole, posArg, greenTarget)
-          : pending.isDrive
-          ? recordBBDrive(pending.teamKey, pending.who, pending.hole, posArg, greenTarget)
-          : recordBBShotAtRound(pending.teamKey, pending.who, pending.hole, pending.roundIndex, posArg, greenTarget);
-        announceShotResult(result, { speakAloud: voiceOn });
-        setDriveModal(null);
-        shotDetector.reset();
-      },
-    });
-  }
 
   function abandonRound() {
     setStep("setup");
@@ -4600,6 +4618,8 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
             onMarkDrive={markDriveForStroke}
             onMarkNextShot={markNextShotForStroke}
             onNext={() => setActiveIdx((i) => Math.min(i + 1, totalHoles))}
+            alertPid={shotDetector.fired && myPending && !driveModal ? mePlayerId : null}
+            alertIsDrive={myPending?.isDrive}
           />
         );
       }
@@ -4688,13 +4708,6 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
             onSetGreenTarget={setGreenTarget}
             onCancel={() => setDriveModal(null)}
             onSave={driveModal.onSave}
-          />
-        )}
-        {shotDetector.fired && myPending && !driveModal && (
-          <ShotStopPrompt
-            hole={myPending.hole}
-            onDismiss={() => shotDetector.reset()}
-            onMark={() => { if (shotDetector.stoppedAt) openAutoShotModal(myPending, shotDetector.stoppedAt); }}
           />
         )}
       </div>
@@ -4804,6 +4817,10 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
           onMarkDrive2={(who) => markDriveForBB("team2", h, who, bbState.team2?.[h.number], who === "A" ? pA2?.name : pB2?.name)}
           onMarkShot2={(who, roundIdx) => markNextShotForBB("team2", h, who, roundIdx, who === "A" ? pA2?.name : pB2?.name)}
           onNext={() => setActiveIdx((i) => Math.min(i + 1, totalHoles))}
+          alertTeamKey={shotDetector.fired && myPending && myPending.kind === "bb" && !driveModal ? myPending.teamKey : null}
+          alertWho={myPending?.who}
+          alertIsDrive={myPending?.isDrive}
+          alertRoundIndex={myPending?.roundIndex}
         />
       );
     }
@@ -4890,13 +4907,6 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
           onSetGreenTarget={setGreenTarget}
           onCancel={() => setDriveModal(null)}
           onSave={driveModal.onSave}
-        />
-      )}
-      {shotDetector.fired && myPending && !driveModal && (
-        <ShotStopPrompt
-          hole={myPending.hole}
-          onDismiss={() => shotDetector.reset()}
-          onMark={() => { if (shotDetector.stoppedAt) openAutoShotModal(myPending, shotDetector.stoppedAt); }}
         />
       )}
     </div>
