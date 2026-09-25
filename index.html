@@ -32,6 +32,14 @@
          rather than patching each button's inline style individually. -->
     <style>
       button:disabled { opacity: 0.45; cursor: not-allowed !important; }
+      /* small pulsing "!" badge used to flag the shot-stop auto-detector's suggestion directly
+         on the relevant Mark drive/Next shot button (25 Sep) — replaces an earlier floating
+         banner that sat over the bottom of the screen and got in the way while simply viewing
+         the app or lining up a shot. See ShotAlertBadge in App.jsx. */
+      @keyframes shotAlertPulse {
+        0%, 100% { transform: scale(1); opacity: 1; }
+        50% { transform: scale(1.18); opacity: 0.75; }
+      }
     </style>
   </head>
   <body>
