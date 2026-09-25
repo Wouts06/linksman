@@ -3762,30 +3762,43 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
                   <ScoreBadge gross={cell.gross} par={hole.par} />
                 </div>
               </div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.03em", color: C.turf, fontFamily: sans, marginBottom: 3 }}>Direction</div>
-                  <ShapeSelector par={hole.par} value={cell.shape} onChange={(v) => onScoreField(pid, hole.number, "shape", v)} />
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
-                    <span style={{ fontSize: 11, color: C.turf, fontFamily: sans }}>Putts</span>
-                    <button
-                      onClick={() => setPuttPickerForPid(pid)}
-                      style={{ width: 48, height: 40, padding: 0, fontFamily: mono, fontSize: 15, fontWeight: 700, border: `1px solid ${C.line}`, borderRadius: 5, boxSizing: "border-box", background: C.white, color: C.ink, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
-                    >
-                      {cell.putts !== "" && cell.putts != null ? cell.putts : "—"}
-                    </button>
+              {/* Putts — its own compact row now that each shot gets a full-width block below
+                  (25 Sep redesign, see the shot-block comment) rather than sharing a half-width
+                  "Direction" column with the drive's shape selector. */}
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                <span style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.03em", color: C.turf, fontFamily: sans }}>Putts</span>
+                <button
+                  onClick={() => setPuttPickerForPid(pid)}
+                  style={{ width: 48, height: 40, padding: 0, fontFamily: mono, fontSize: 15, fontWeight: 700, border: `1px solid ${C.line}`, borderRadius: 5, boxSizing: "border-box", background: C.white, color: C.ink, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
+                >
+                  {cell.putts !== "" && cell.putts != null ? cell.putts : "—"}
+                </button>
+              </div>
+
+              {/* Each shot (drive, then S2/S3/…) is now its own bordered block (25 Sep, per
+                  explicit report: "the penalty buttons are still resizing all over the place" +
+                  "block/table each shot so it is visually easier to differentiate" +
+                  "S2: 2m to become a heading"). Every control inside a block is full-width, so
+                  the penalty button in particular is finally sized identically everywhere —
+                  its old size came entirely from being crammed into an inline row alongside a
+                  club select; that row is gone. Direction (ShapeSelector) is now recorded per
+                  shot too, not just on the drive, per the explicit follow-up ask — stored the
+                  same way club already was, on the shot's own object. */}
+              {hole.teeLat != null && (
+                <div style={{ border: `1px solid ${C.line}`, borderRadius: 6, padding: 8, background: C.paper }}>
+                  <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 6 }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em", color: C.turf, fontFamily: sans }}>Drive</span>
+                    {cell.driveYards != null && (
+                      <span style={{ fontSize: 13, fontWeight: 700, color: C.fairway, fontFamily: sans }}>{Math.round(displayDistance(cell.driveYards, distanceUnit))}{unitLabel}</span>
+                    )}
                   </div>
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.03em", color: C.turf, fontFamily: sans, marginBottom: 3 }}>Shots</div>
-                  {hole.teeLat != null && (
-                    <div style={{ position: "relative" }}>
-                      <button style={{ ...btnGhost, fontSize: 12.5, padding: "10px 8px", width: "100%", boxSizing: "border-box" }} onClick={() => onMarkDrive(pid)}>
-                        {cell.driveYards ? `📍 ${Math.round(displayDistance(cell.driveYards, distanceUnit))}${unitLabel}` : "📍 Mark drive"}
-                      </button>
-                      {alertPid === pid && alertIsDrive && <ShotAlertBadge />}
-                    </div>
-                  )}
+                  <ShapeSelector par={hole.par} value={cell.shape} onChange={(v) => onScoreField(pid, hole.number, "shape", v)} />
+                  <div style={{ position: "relative", marginTop: 8 }}>
+                    <button style={{ ...btnGhost, fontSize: 12.5, padding: "10px 8px", width: "100%", boxSizing: "border-box" }} onClick={() => onMarkDrive(pid)}>
+                      {cell.driveYards ? `📍 ${Math.round(displayDistance(cell.driveYards, distanceUnit))}${unitLabel}` : "📍 Mark drive"}
+                    </button>
+                    {alertPid === pid && alertIsDrive && <ShotAlertBadge />}
+                  </div>
                   <select
                     style={{ ...inputStyle, width: "100%", boxSizing: "border-box", padding: "9px 6px", fontSize: 13, marginTop: 6 }}
                     value={cell.club || ""}
@@ -3796,54 +3809,69 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
                   </select>
                   {/* drive penalty — not gated on hole.teeLat like the GPS-driven controls above,
                       since tagging a penalty doesn't need a marked distance (15 Aug) */}
-                  <div style={{ marginTop: 4 }}>
+                  <div style={{ marginTop: 6 }}>
                     <PenaltyBadgeButton
                       value={cell.drivePenalty}
                       label="+ Penalty (drive)"
                       onClick={() => setPenaltyTarget({ pid, kind: "drive" })}
                     />
                   </div>
-                  {hole.teeLat != null && extraShots.map((es, i) => (
-                    <div key={i} style={{ fontSize: 11, color: C.turf, fontFamily: sans, marginTop: 6, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                      <span style={{ flexShrink: 0 }}>S{i + 2}: {es.yards != null ? `${Math.round(displayDistance(es.yards, distanceUnit))}${unitLabel}` : "—"}</span>
-                      <select
-                        style={{ ...inputStyle, flex: 1, minWidth: 0, padding: "7px 5px", fontSize: 12 }}
-                        value={es.club || ""}
-                        onChange={(e) => {
-                          const next = [...extraShots];
-                          next[i] = { ...next[i], club: e.target.value || null };
-                          onScoreField(pid, hole.number, "extraShots", next);
-                        }}
-                      >
-                        <option value="">—</option>
-                        {CLUBS.map((c) => <option key={c} value={c}>{CLUB_ABBREV[c] || c}</option>)}
-                      </select>
-                      <PenaltyBadgeButton
-                        value={es.penalty}
-                        label={`+ Penalty (S${i + 2})`}
-                        onClick={() => setPenaltyTarget({ pid, kind: "extra", idx: i })}
-                        style={{ width: 108, flexShrink: 0, padding: "8px 8px", fontSize: 11 }}
-                      />
-                    </div>
-                  ))}
-                  {/* gated on the drive already being marked (25 Sep, per explicit report: "if I
-                      click +Next shot it prompts me to mark my position at that point as well" —
-                      i.e. it looked like a redundant duplicate of Mark drive). Mark drive records
-                      shot 1's own distance/club fields; +Next shot records shot 2 onward into
-                      extraShots, anchored from the drive (or, previously, straight from the tee
-                      if no drive existed yet — which silently mislabeled that first shot "S2"
-                      instead of ever using the drive fields). Hiding it until there's a drive to
-                      anchor from removes the apparent redundancy and that mislabeling. */}
-                  {hole.teeLat != null && cell.driveLat != null && (
-                    <div style={{ position: "relative", marginTop: 6 }}>
-                      <button style={{ ...btnGhost, fontSize: 12.5, padding: "10px 8px", width: "100%", boxSizing: "border-box" }} onClick={() => onMarkNextShot(pid)}>
-                        + Next shot
-                      </button>
-                      {alertPid === pid && !alertIsDrive && <ShotAlertBadge />}
-                    </div>
-                  )}
                 </div>
-              </div>
+              )}
+
+              {hole.teeLat != null && extraShots.map((es, i) => (
+                <div key={i} style={{ border: `1px solid ${C.line}`, borderRadius: 6, padding: 8, background: C.paper, marginTop: 8 }}>
+                  <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 6 }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em", color: C.turf, fontFamily: sans }}>S{i + 2}</span>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: C.fairway, fontFamily: sans }}>{es.yards != null ? `${Math.round(displayDistance(es.yards, distanceUnit))}${unitLabel}` : "—"}</span>
+                  </div>
+                  <ShapeSelector
+                    par={hole.par}
+                    value={es.shape}
+                    onChange={(v) => {
+                      const next = [...extraShots];
+                      next[i] = { ...next[i], shape: v };
+                      onScoreField(pid, hole.number, "extraShots", next);
+                    }}
+                  />
+                  <select
+                    style={{ ...inputStyle, width: "100%", boxSizing: "border-box", padding: "9px 6px", fontSize: 13, marginTop: 8 }}
+                    value={es.club || ""}
+                    onChange={(e) => {
+                      const next = [...extraShots];
+                      next[i] = { ...next[i], club: e.target.value || null };
+                      onScoreField(pid, hole.number, "extraShots", next);
+                    }}
+                  >
+                    <option value="">Club —</option>
+                    {CLUBS.map((c) => <option key={c} value={c}>{CLUB_ABBREV[c] || c}</option>)}
+                  </select>
+                  <div style={{ marginTop: 6 }}>
+                    <PenaltyBadgeButton
+                      value={es.penalty}
+                      label={`+ Penalty (S${i + 2})`}
+                      onClick={() => setPenaltyTarget({ pid, kind: "extra", idx: i })}
+                    />
+                  </div>
+                </div>
+              ))}
+
+              {/* gated on the drive already being marked (25 Sep, per explicit report: "if I
+                  click +Next shot it prompts me to mark my position at that point as well" —
+                  i.e. it looked like a redundant duplicate of Mark drive). Mark drive records
+                  shot 1's own distance/club fields; +Next shot records shot 2 onward into
+                  extraShots, anchored from the drive (or, previously, straight from the tee
+                  if no drive existed yet — which silently mislabeled that first shot "S2"
+                  instead of ever using the drive fields). Hiding it until there's a drive to
+                  anchor from removes the apparent redundancy and that mislabeling. */}
+              {hole.teeLat != null && cell.driveLat != null && (
+                <div style={{ position: "relative", marginTop: 8 }}>
+                  <button style={{ ...btnGhost, fontSize: 12.5, padding: "10px 8px", width: "100%", boxSizing: "border-box" }} onClick={() => onMarkNextShot(pid)}>
+                    + Next shot
+                  </button>
+                  {alertPid === pid && !alertIsDrive && <ShotAlertBadge />}
+                </div>
+              )}
             </div>
           );
         })}
