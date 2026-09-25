@@ -1080,9 +1080,9 @@ function GreenTargetToggle({ value, onChange, width, height }) {
           key={opt}
           onClick={() => onChange(opt)}
           style={{
-            fontSize: 11.5, fontFamily: sans, fontWeight: 700, cursor: "pointer",
+            fontSize: 13, fontFamily: sans, fontWeight: 700, cursor: "pointer",
             border: "none", textTransform: "capitalize", textAlign: "center",
-            padding: fixed ? "0 9px" : "4px 9px", flex: width ? 1 : undefined,
+            padding: fixed ? "0 9px" : "8px 12px", flex: width ? 1 : undefined,
             display: fixed ? "flex" : undefined, alignItems: fixed ? "center" : undefined, justifyContent: fixed ? "center" : undefined,
             background: value === opt ? C.fairway : C.white,
             color: value === opt ? C.white : C.turf,
@@ -1497,13 +1497,15 @@ function ShapeSelector({ par, value, onChange }) {
     ? [["left", "L"], ["green", "GR"], ["right", "R"], ["long", "O"], ["short", "S"]]
     : [["left", "L"], ["fairway", "F"], ["right", "R"]];
   return (
-    <div style={{ display: "flex", gap: 4, marginTop: 4, flexWrap: "wrap" }}>
+    <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
       {opts.map(([v, label]) => (
         <button
           key={v}
           onClick={() => onChange(value === v ? null : v)}
           style={{
-            fontSize: 12, padding: "5px 8px", fontFamily: sans, fontWeight: 700, borderRadius: 4, cursor: "pointer",
+            fontSize: 14, padding: "10px 12px", minWidth: 40, minHeight: 40, boxSizing: "border-box",
+            fontFamily: sans, fontWeight: 700, borderRadius: 5, cursor: "pointer",
+            display: "flex", alignItems: "center", justifyContent: "center",
             border: `1px solid ${value === v ? C.fairway : C.line}`,
             background: value === v ? C.fairway : C.white,
             color: value === v ? C.white : C.turf,
@@ -2124,8 +2126,8 @@ const selectStyle = {
   backgroundRepeat: "no-repeat", backgroundPosition: "right 12px center", paddingRight: 30,
 };
 const btnPrimary = {
-  background: C.fairway, color: C.white, border: "none", borderRadius: 6, padding: "13px 20px",
-  fontFamily: sans, fontSize: 16, fontWeight: 600, cursor: "pointer",
+  background: C.fairway, color: C.white, border: "none", borderRadius: 6, padding: "17px 20px",
+  fontFamily: sans, fontSize: 17, fontWeight: 600, cursor: "pointer",
 };
 const btnGhost = {
   background: "transparent", color: C.fairway, border: `1px solid ${C.fairway}`, borderRadius: 6,
@@ -3187,7 +3189,7 @@ function PenaltyBadgeButton({ value, onClick, label = "+ Penalty" }) {
     <button
       onClick={onClick}
       style={{
-        fontSize: 9.5, fontFamily: sans, fontWeight: 700, padding: "3px 7px", borderRadius: 4, cursor: "pointer",
+        fontSize: 11.5, fontFamily: sans, fontWeight: 700, padding: "8px 11px", borderRadius: 5, cursor: "pointer",
         border: `1px solid ${value ? C.flag : C.line}`,
         background: value ? C.flag : C.white,
         color: value ? C.white : C.turf,
@@ -3294,11 +3296,11 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
                       )}
                       <ShapeSelector par={hole.par} value={r.shapeA} onChange={(v) => patchRound(i, { shapeA: v })} />
                       {hole.teeLat != null && (
-                        <button style={{ ...btnGhost, fontSize: 10, padding: "3px 6px", marginTop: 4 }} onClick={() => onMarkDrive && onMarkDrive("A")}>
+                        <button style={{ ...btnGhost, fontSize: 11.5, padding: "8px 8px", marginTop: 6 }} onClick={() => onMarkDrive && onMarkDrive("A")}>
                           {r.driveYardsA ? `📍 ${Math.round(displayDistance(r.driveYardsA, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : "📍 Mark"}
                         </button>
                       )}
-                      <select style={{ ...inputStyle, width: 90, padding: "3px 4px", fontSize: 11, marginTop: 4 }} value={r.clubA || ""} onChange={(e) => patchRound(i, { clubA: e.target.value || null })}>
+                      <select style={{ ...inputStyle, width: 96, padding: "7px 4px", fontSize: 12, marginTop: 6 }} value={r.clubA || ""} onChange={(e) => patchRound(i, { clubA: e.target.value || null })}>
                         <option value="">Club —</option>
                         {CLUBS.map((c) => <option key={c} value={c}>{c}</option>)}
                       </select>
@@ -3321,11 +3323,11 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
                       )}
                       <ShapeSelector par={hole.par} value={r.shapeB} onChange={(v) => patchRound(i, { shapeB: v })} />
                       {hole.teeLat != null && (
-                        <button style={{ ...btnGhost, fontSize: 10, padding: "3px 6px", marginTop: 4 }} onClick={() => onMarkDrive && onMarkDrive("B")}>
+                        <button style={{ ...btnGhost, fontSize: 11.5, padding: "8px 8px", marginTop: 6 }} onClick={() => onMarkDrive && onMarkDrive("B")}>
                           {r.driveYardsB ? `📍 ${Math.round(displayDistance(r.driveYardsB, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : "📍 Mark"}
                         </button>
                       )}
-                      <select style={{ ...inputStyle, width: 90, padding: "3px 4px", fontSize: 11, marginTop: 4 }} value={r.clubB || ""} onChange={(e) => patchRound(i, { clubB: e.target.value || null })}>
+                      <select style={{ ...inputStyle, width: 96, padding: "7px 4px", fontSize: 12, marginTop: 6 }} value={r.clubB || ""} onChange={(e) => patchRound(i, { clubB: e.target.value || null })}>
                         <option value="">Club —</option>
                         {CLUBS.map((c) => <option key={c} value={c}>{c}</option>)}
                       </select>
@@ -3347,11 +3349,11 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
                     <div style={{ marginBottom: 4, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                       <span style={{ color: C.turf }}>{hitName}:</span>
                       {hole.teeLat != null && (
-                        <button style={{ ...btnGhost, fontSize: 10, padding: "3px 6px" }} onClick={() => onMarkShot && onMarkShot(whoHit, i)}>
+                        <button style={{ ...btnGhost, fontSize: 11.5, padding: "8px 8px" }} onClick={() => onMarkShot && onMarkShot(whoHit, i)}>
                           {r.shotYards != null ? `📍 ${Math.round(displayDistance(r.shotYards, distanceUnit))}${distanceUnit === "m" ? "m" : "y"}` : "📍 Mark shot"}
                         </button>
                       )}
-                      <select style={{ ...inputStyle, width: 90, padding: "3px 4px", fontSize: 11 }} value={r.club || ""} onChange={(e) => patchRound(i, { club: e.target.value || null })}>
+                      <select style={{ ...inputStyle, width: 96, padding: "7px 4px", fontSize: 12 }} value={r.club || ""} onChange={(e) => patchRound(i, { club: e.target.value || null })}>
                         <option value="">Club —</option>
                         {CLUBS.map((c) => <option key={c} value={c}>{c}</option>)}
                       </select>
@@ -3367,7 +3369,7 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
                     <button key={who}
                       onClick={() => patchRound(i, { continueWith: who })}
                       style={{
-                        fontSize: 13, padding: "6px 10px", borderRadius: 5, cursor: "pointer", fontFamily: sans, fontWeight: 600,
+                        fontSize: 13, padding: "10px 12px", borderRadius: 5, cursor: "pointer", fontFamily: sans, fontWeight: 600,
                         border: `1px solid ${r.continueWith === who ? teamColor : C.line}`,
                         background: r.continueWith === who ? teamColor : C.white,
                         color: r.continueWith === who ? C.white : C.ink,
@@ -3380,10 +3382,10 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
               </div>
             );
           })}
-          <div style={{ display: "flex", gap: 6, marginTop: 2, flexWrap: "wrap" }}>
-            <button style={{ ...btnGhost, fontSize: 13, padding: "6px 12px" }} disabled={!lastRound.continueWith} onClick={addRound}>+ Shot</button>
-            <button style={{ ...btnGhost, fontSize: 13, padding: "6px 12px", borderColor: C.flag, color: C.flag }} disabled={s.rounds.length <= 1} onClick={removeLastRound}>− Shot</button>
-            <button style={{ ...btnGhost, fontSize: 13, padding: "6px 12px", borderColor: C.turf, color: C.turf }} disabled={!lastRound.continueWith} onClick={() => patch({ onGreen: true })}>On the green →</button>
+          <div style={{ display: "flex", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
+            <button style={{ ...btnGhost, fontSize: 13, padding: "10px 14px" }} disabled={!lastRound.continueWith} onClick={addRound}>+ Shot</button>
+            <button style={{ ...btnGhost, fontSize: 13, padding: "10px 14px", borderColor: C.flag, color: C.flag }} disabled={s.rounds.length <= 1} onClick={removeLastRound}>− Shot</button>
+            <button style={{ ...btnGhost, fontSize: 13, padding: "10px 14px", borderColor: C.turf, color: C.turf }} disabled={!lastRound.continueWith} onClick={() => patch({ onGreen: true })}>On the green →</button>
           </div>
         </div>
       )}
@@ -3396,8 +3398,8 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
           </div>
           <div style={{ color: C.turf, marginBottom: 6 }}>{s.rounds.length} shot{s.rounds.length !== 1 ? "s" : ""} to reach the green</div>
           <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-            <button onClick={() => patch({ puttMode: "better" })} style={{ ...btnGhost, fontSize: 13, padding: "8px 14px", background: s.puttMode === "better" ? teamColor : C.white, color: s.puttMode === "better" ? C.white : teamColor, borderColor: teamColor }}>Putt better ball</button>
-            <button onClick={() => patch({ puttMode: "own" })} style={{ ...btnGhost, fontSize: 13, padding: "8px 14px", background: s.puttMode === "own" ? teamColor : C.white, color: s.puttMode === "own" ? C.white : teamColor, borderColor: teamColor }}>Play own ball</button>
+            <button onClick={() => patch({ puttMode: "better" })} style={{ ...btnGhost, fontSize: 13, padding: "11px 14px", background: s.puttMode === "better" ? teamColor : C.white, color: s.puttMode === "better" ? C.white : teamColor, borderColor: teamColor }}>Putt better ball</button>
+            <button onClick={() => patch({ puttMode: "own" })} style={{ ...btnGhost, fontSize: 13, padding: "11px 14px", background: s.puttMode === "own" ? teamColor : C.white, color: s.puttMode === "own" ? C.white : teamColor, borderColor: teamColor }}>Play own ball</button>
           </div>
           {s.puttMode && (
             <>
@@ -3410,10 +3412,10 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
                 Enter each player's putts — recorded for stats either way.
               </div>
               <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-                <button onClick={() => setPuttPickerFor("A")} style={{ ...btnGhost, fontSize: 12, padding: "8px 14px", textAlign: "left", lineHeight: 1.3 }}>
+                <button onClick={() => setPuttPickerFor("A")} style={{ ...btnGhost, fontSize: 12, padding: "11px 14px", textAlign: "left", lineHeight: 1.3 }}>
                   {playerAName}<br /><b style={{ fontSize: 17, fontFamily: mono }}>{s.ownPutts.A || "—"}</b>
                 </button>
-                <button onClick={() => setPuttPickerFor("B")} style={{ ...btnGhost, fontSize: 12, padding: "8px 14px", textAlign: "left", lineHeight: 1.3 }}>
+                <button onClick={() => setPuttPickerFor("B")} style={{ ...btnGhost, fontSize: 12, padding: "11px 14px", textAlign: "left", lineHeight: 1.3 }}>
                   {playerBName}<br /><b style={{ fontSize: 17, fontFamily: mono }}>{s.ownPutts.B || "—"}</b>
                 </button>
               </div>
@@ -3424,7 +3426,7 @@ function BetterBallHoleCard({ hole, teamKey, teamColor, teamLabel, playerAName, 
               )}
             </>
           )}
-          <button style={{ ...btnGhost, fontSize: 12, padding: "6px 12px", marginTop: 6 }} onClick={() => patch({ onGreen: false })}>← Back off the green</button>
+          <button style={{ ...btnGhost, fontSize: 12, padding: "10px 14px", marginTop: 6 }} onClick={() => patch({ onGreen: false })}>← Back off the green</button>
         </div>
       )}
       {puttPickerFor && (
@@ -3569,7 +3571,7 @@ function BetterBallFocusedHole({
         <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", fontFamily: sans, fontSize: 12, color: C.turf, flexShrink: 0 }}>
           {hole.greenPolygon?.length > 0 && (
             <div style={{ marginBottom: 6 }}>
-              <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} width={132} height={30} />
+              <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} width={150} height={42} />
             </div>
           )}
           {liveYards != null && (
@@ -3579,7 +3581,7 @@ function BetterBallFocusedHole({
             </div>
           )}
           {hole.greenLat != null && (
-            <button style={{ ...btnGhost, fontSize: 12.5, padding: "0 10px", marginTop: 4, width: 132, height: 30, boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
+            <button style={{ ...btnGhost, fontSize: 13.5, padding: "0 10px", marginTop: 4, width: 150, height: 42, boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
           )}
         </div>
       </div>
@@ -3675,7 +3677,7 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
         <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", fontFamily: sans, fontSize: 12, color: C.turf, flexShrink: 0 }}>
           {hole.greenPolygon?.length > 0 && (
             <div style={{ marginBottom: 6 }}>
-              <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} width={132} height={30} />
+              <GreenTargetToggle value={greenTarget} onChange={onSetGreenTarget} width={150} height={42} />
             </div>
           )}
           {liveYards != null && (
@@ -3686,7 +3688,7 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
           )}
           {suggestion && <div style={{ color: C.fairway }}>🎒 {suggestion}</div>}
           {hole.greenLat != null && (
-            <button style={{ ...btnGhost, fontSize: 12.5, padding: "0 10px", marginTop: 4, width: 132, height: 30, boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
+            <button style={{ ...btnGhost, fontSize: 13.5, padding: "0 10px", marginTop: 4, width: 150, height: 42, boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
           )}
         </div>
       </div>
@@ -3701,7 +3703,7 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
         />
       )}
 
-      <div style={{ display: "grid", gap: 8 }}>
+      <div style={{ display: "grid", gap: 10 }}>
         {selected.map((pid) => {
           const cell = scores[pid]?.[hole.number] || {};
           const player = players.find((p) => p.id === pid);
@@ -3711,7 +3713,7 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
           const playerTeeHole = course ? getTeeHole(course, playerTeeId, hole.number) : null;
           const showPlayerTee = playerTee && playerTeeId !== defaultTeeId;
           return (
-            <div key={pid} style={{ border: `1px solid ${C.line}`, borderRadius: 6, padding: 8 }}>
+            <div key={pid} style={{ border: `1px solid ${C.line}`, borderRadius: 6, padding: 10, minWidth: 0 }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6, gap: 8 }}>
                 <div style={{ minWidth: 0, overflow: "hidden" }}>
                   <div style={{ fontFamily: sans, fontSize: 13, fontWeight: 700, color: C.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{player?.name}</div>
@@ -3727,7 +3729,7 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
                   <input
                     type="number"
-                    style={{ width: 44, padding: "5px 6px", fontFamily: mono, fontSize: 16, border: `1px solid ${C.line}`, borderRadius: 5, boxSizing: "border-box" }}
+                    style={{ width: 52, padding: "9px 6px", fontFamily: mono, fontSize: 17, border: `1px solid ${C.line}`, borderRadius: 5, boxSizing: "border-box" }}
                     value={cell.gross ?? ""}
                     onChange={(e) => onScoreField(pid, hole.number, "gross", e.target.value)}
                   />
@@ -3742,7 +3744,7 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
                     <span style={{ fontSize: 11, color: C.turf, fontFamily: sans }}>Putts</span>
                     <button
                       onClick={() => setPuttPickerForPid(pid)}
-                      style={{ width: 38, padding: "4px 5px", fontFamily: mono, fontSize: 13, fontWeight: 700, border: `1px solid ${C.line}`, borderRadius: 4, boxSizing: "border-box", background: C.white, color: C.ink, cursor: "pointer" }}
+                      style={{ width: 48, height: 40, padding: 0, fontFamily: mono, fontSize: 15, fontWeight: 700, border: `1px solid ${C.line}`, borderRadius: 5, boxSizing: "border-box", background: C.white, color: C.ink, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
                     >
                       {cell.putts !== "" && cell.putts != null ? cell.putts : "—"}
                     </button>
@@ -3751,12 +3753,12 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.03em", color: C.turf, fontFamily: sans, marginBottom: 3 }}>Shots</div>
                   {hole.teeLat != null && (
-                    <button style={{ ...btnGhost, fontSize: 10, padding: "4px 6px", width: "100%", boxSizing: "border-box" }} onClick={() => onMarkDrive(pid)}>
+                    <button style={{ ...btnGhost, fontSize: 12.5, padding: "10px 8px", width: "100%", boxSizing: "border-box" }} onClick={() => onMarkDrive(pid)}>
                       {cell.driveYards ? `📍 ${Math.round(displayDistance(cell.driveYards, distanceUnit))}${unitLabel}` : "📍 Mark drive"}
                     </button>
                   )}
                   <select
-                    style={{ ...inputStyle, width: "100%", boxSizing: "border-box", padding: "3px 4px", fontSize: 11, marginTop: 4 }}
+                    style={{ ...inputStyle, width: "100%", boxSizing: "border-box", padding: "9px 6px", fontSize: 13, marginTop: 6 }}
                     value={cell.club || ""}
                     onChange={(e) => onScoreField(pid, hole.number, "club", e.target.value || null)}
                   >
@@ -3773,10 +3775,10 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
                     />
                   </div>
                   {hole.teeLat != null && extraShots.map((es, i) => (
-                    <div key={i} style={{ fontSize: 10, color: C.turf, fontFamily: sans, marginTop: 4, display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
+                    <div key={i} style={{ fontSize: 11, color: C.turf, fontFamily: sans, marginTop: 6, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                       <span style={{ flexShrink: 0 }}>S{i + 2}: {es.yards != null ? `${Math.round(displayDistance(es.yards, distanceUnit))}${unitLabel}` : "—"}</span>
                       <select
-                        style={{ ...inputStyle, flex: 1, minWidth: 0, padding: "2px 3px", fontSize: 10 }}
+                        style={{ ...inputStyle, flex: 1, minWidth: 0, padding: "7px 5px", fontSize: 12 }}
                         value={es.club || ""}
                         onChange={(e) => {
                           const next = [...extraShots];
@@ -3795,7 +3797,7 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
                     </div>
                   ))}
                   {hole.teeLat != null && (
-                    <button style={{ ...btnGhost, fontSize: 10, padding: "4px 6px", marginTop: 4, width: "100%", boxSizing: "border-box" }} onClick={() => onMarkNextShot(pid)}>
+                    <button style={{ ...btnGhost, fontSize: 12.5, padding: "10px 8px", marginTop: 6, width: "100%", boxSizing: "border-box" }} onClick={() => onMarkNextShot(pid)}>
                       + Next shot
                     </button>
                   )}
