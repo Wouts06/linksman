@@ -3957,6 +3957,20 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
         <PuttPickerModal
           title={`${players.find((p) => p.id === puttPickerForPid)?.name || "Player"} — putts on hole ${hole.number}`}
           onSelect={(n) => {
+            /* putts now auto-add to gross too (25 Sep, per explicit report: "the putts are now
+               not adding to the total shots when I move on to the next hole" — Round D's
+               auto-count only covered Mark drive/+Next shot/penalties, missing the putts picker,
+               so a round scored purely by tapping buttons under-counted by however many putts
+               were taken). Same ±delta pattern as applyStrokePenalty: compares against whatever
+               putts value was there before (0 if never set) so correcting an already-entered
+               putt count adjusts gross by the difference instead of double-counting. */
+            const cell = scores[puttPickerForPid]?.[hole.number] || {};
+            const oldPutts = cell.putts !== "" && cell.putts != null ? Number(cell.putts) : 0;
+            const delta = n - oldPutts;
+            if (delta !== 0) {
+              const currentGross = cell.gross === "" || cell.gross == null ? 0 : Number(cell.gross);
+              onScoreField(puttPickerForPid, hole.number, "gross", String(Math.max(0, currentGross + delta)));
+            }
             onScoreField(puttPickerForPid, hole.number, "putts", String(n));
             setPuttPickerForPid(null);
           }}
