@@ -3653,6 +3653,15 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
   const [puttPickerForPid, setPuttPickerForPid] = useState(null); // 15 Aug — same tap-only picker as Better Ball, applied here too
   const [penaltyTarget, setPenaltyTarget] = useState(null); // null | { pid, kind: "drive" } | { pid, kind: "extra", idx }
   const [showGreenView, setShowGreenView] = useState(false);
+  /* which shot block is expanded per player (25 Sep, per explicit request: "minimize the
+     previous shot once Next Shot is clicked") — keyed by pid, storing the tapped-open block's
+     key ("drive" or an extraShots index) together with the shot count at the time it was chosen.
+     Read back at render time: if the stored shotCount no longer matches (a new shot got marked
+     since), the stored choice is stale and ignored in favor of the latest shot — so adding a
+     shot always snaps focus to it, but tapping an earlier block to review/fix it (e.g. a wrong
+     club) still works within the same shot count. Avoids needing a hook per player inside the
+     selected.map below, which the Rules of Hooks don't allow. */
+  const [openShot, setOpenShot] = useState({});
   const aimGreen = livePos ? greenAimPoint(livePos.lat, livePos.lon, hole, greenTarget) : null;
   const liveYards = aimGreen && livePos ? haversineYards(livePos.lat, livePos.lon, aimGreen.lat, aimGreen.lon) : null;
   const rangefinder = useRangefinder(rangefinderEnabled, `${course?.id || "c"}-${hole.number}`, livePos?.lat, livePos?.lon, aimGreen?.lat, aimGreen?.lon, liveYards);
@@ -3738,6 +3747,15 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
           const playerTee = courseTees.find((t) => t.id === playerTeeId);
           const playerTeeHole = course ? getTeeHole(course, playerTeeId, hole.number) : null;
           const showPlayerTee = playerTee && playerTeeId !== defaultTeeId;
+          /* accordion state (25 Sep, per explicit request: "minimize the previous shot, once
+             the Next Shot is clicked") — see the openShot comment above for the staleness rule.
+             latestKey is "drive" until a drive is marked (nothing to collapse yet) or once
+             recorded, whichever shot was added most recently. */
+          const shotCount = (cell.driveLat != null ? 1 : 0) + extraShots.length;
+          const latestKey = extraShots.length > 0 ? extraShots.length - 1 : "drive";
+          const storedOpen = openShot[pid];
+          const openKey = storedOpen && storedOpen.shotCount === shotCount ? storedOpen.key : latestKey;
+          const openShotBlock = (key) => setOpenShot((prev) => ({ ...prev, [pid]: { key, shotCount } }));
           return (
             <div key={pid} style={{ border: `1px solid ${C.line}`, borderRadius: 6, padding: 10, minWidth: 0 }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6, gap: 8 }}>
@@ -3762,19 +3780,6 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
                   <ScoreBadge gross={cell.gross} par={hole.par} />
                 </div>
               </div>
-              {/* Putts — its own compact row now that each shot gets a full-width block below
-                  (25 Sep redesign, see the shot-block comment) rather than sharing a half-width
-                  "Direction" column with the drive's shape selector. */}
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                <span style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.03em", color: C.turf, fontFamily: sans }}>Putts</span>
-                <button
-                  onClick={() => setPuttPickerForPid(pid)}
-                  style={{ width: 48, height: 40, padding: 0, fontFamily: mono, fontSize: 15, fontWeight: 700, border: `1px solid ${C.line}`, borderRadius: 5, boxSizing: "border-box", background: C.white, color: C.ink, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
-                >
-                  {cell.putts !== "" && cell.putts != null ? cell.putts : "—"}
-                </button>
-              </div>
-
               {/* Each shot (drive, then S2/S3/…) is now its own bordered block (25 Sep, per
                   explicit report: "the penalty buttons are still resizing all over the place" +
                   "block/table each shot so it is visually easier to differentiate" +
@@ -3784,7 +3789,7 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
                   club select; that row is gone. Direction (ShapeSelector) is now recorded per
                   shot too, not just on the drive, per the explicit follow-up ask — stored the
                   same way club already was, on the shot's own object. */}
-              {hole.teeLat != null && (
+              {hole.teeLat != null && (openKey === "drive" ? (
                 <div style={{ border: `1px solid ${C.line}`, borderRadius: 6, padding: 8, background: C.paper }}>
                   <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 6 }}>
                     <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em", color: C.turf, fontFamily: sans }}>Drive</span>
@@ -3817,42 +3822,74 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
                     />
                   </div>
                 </div>
-              )}
+              ) : (
+                /* collapsed — the drive has already been marked and a later shot is now
+                   focused; tapping this compact summary row re-expands it for review/editing
+                   (25 Sep, per explicit request to minimize the previous shot once Next Shot
+                   is clicked) */
+                <button
+                  onClick={() => openShotBlock("drive")}
+                  style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", boxSizing: "border-box", border: `1px solid ${C.line}`, borderRadius: 6, padding: "8px 10px", background: C.paper, cursor: "pointer", textAlign: "left" }}
+                >
+                  <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em", color: C.turf, fontFamily: sans }}>Drive</span>
+                  <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                    {cell.club && <span style={{ fontSize: 11, color: C.turf, fontFamily: sans, whiteSpace: "nowrap" }}>{CLUB_ABBREV[cell.club] || cell.club}</span>}
+                    {cell.drivePenalty && <span style={{ fontSize: 11, color: C.flag, fontFamily: sans, fontWeight: 700 }}>⚠ {cell.drivePenalty}</span>}
+                    {cell.driveYards != null && <span style={{ fontSize: 13, fontWeight: 700, color: C.fairway, fontFamily: sans, whiteSpace: "nowrap" }}>{Math.round(displayDistance(cell.driveYards, distanceUnit))}{unitLabel}</span>}
+                  </span>
+                </button>
+              ))}
 
               {hole.teeLat != null && extraShots.map((es, i) => (
-                <div key={i} style={{ border: `1px solid ${C.line}`, borderRadius: 6, padding: 8, background: C.paper, marginTop: 8 }}>
-                  <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 6 }}>
-                    <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em", color: C.turf, fontFamily: sans }}>S{i + 2}</span>
-                    <span style={{ fontSize: 13, fontWeight: 700, color: C.fairway, fontFamily: sans }}>{es.yards != null ? `${Math.round(displayDistance(es.yards, distanceUnit))}${unitLabel}` : "—"}</span>
-                  </div>
-                  <ShapeSelector
-                    par={hole.par}
-                    value={es.shape}
-                    onChange={(v) => {
-                      const next = [...extraShots];
-                      next[i] = { ...next[i], shape: v };
-                      onScoreField(pid, hole.number, "extraShots", next);
-                    }}
-                  />
-                  <select
-                    style={{ ...inputStyle, width: "100%", boxSizing: "border-box", padding: "9px 6px", fontSize: 13, marginTop: 8 }}
-                    value={es.club || ""}
-                    onChange={(e) => {
-                      const next = [...extraShots];
-                      next[i] = { ...next[i], club: e.target.value || null };
-                      onScoreField(pid, hole.number, "extraShots", next);
-                    }}
-                  >
-                    <option value="">Club —</option>
-                    {CLUBS.map((c) => <option key={c} value={c}>{CLUB_ABBREV[c] || c}</option>)}
-                  </select>
-                  <div style={{ marginTop: 6 }}>
-                    <PenaltyBadgeButton
-                      value={es.penalty}
-                      label={`+ Penalty (S${i + 2})`}
-                      onClick={() => setPenaltyTarget({ pid, kind: "extra", idx: i })}
-                    />
-                  </div>
+                <div key={i} style={{ marginTop: 8 }}>
+                  {openKey === i ? (
+                    <div style={{ border: `1px solid ${C.line}`, borderRadius: 6, padding: 8, background: C.paper }}>
+                      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 6 }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em", color: C.turf, fontFamily: sans }}>S{i + 2}</span>
+                        <span style={{ fontSize: 13, fontWeight: 700, color: C.fairway, fontFamily: sans }}>{es.yards != null ? `${Math.round(displayDistance(es.yards, distanceUnit))}${unitLabel}` : "—"}</span>
+                      </div>
+                      <ShapeSelector
+                        par={hole.par}
+                        value={es.shape}
+                        onChange={(v) => {
+                          const next = [...extraShots];
+                          next[i] = { ...next[i], shape: v };
+                          onScoreField(pid, hole.number, "extraShots", next);
+                        }}
+                      />
+                      <select
+                        style={{ ...inputStyle, width: "100%", boxSizing: "border-box", padding: "9px 6px", fontSize: 13, marginTop: 8 }}
+                        value={es.club || ""}
+                        onChange={(e) => {
+                          const next = [...extraShots];
+                          next[i] = { ...next[i], club: e.target.value || null };
+                          onScoreField(pid, hole.number, "extraShots", next);
+                        }}
+                      >
+                        <option value="">Club —</option>
+                        {CLUBS.map((c) => <option key={c} value={c}>{CLUB_ABBREV[c] || c}</option>)}
+                      </select>
+                      <div style={{ marginTop: 6 }}>
+                        <PenaltyBadgeButton
+                          value={es.penalty}
+                          label={`+ Penalty (S${i + 2})`}
+                          onClick={() => setPenaltyTarget({ pid, kind: "extra", idx: i })}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => openShotBlock(i)}
+                      style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", boxSizing: "border-box", border: `1px solid ${C.line}`, borderRadius: 6, padding: "8px 10px", background: C.paper, cursor: "pointer", textAlign: "left" }}
+                    >
+                      <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.03em", color: C.turf, fontFamily: sans }}>S{i + 2}</span>
+                      <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                        {es.club && <span style={{ fontSize: 11, color: C.turf, fontFamily: sans, whiteSpace: "nowrap" }}>{CLUB_ABBREV[es.club] || es.club}</span>}
+                        {es.penalty && <span style={{ fontSize: 11, color: C.flag, fontFamily: sans, fontWeight: 700 }}>⚠ {es.penalty}</span>}
+                        <span style={{ fontSize: 13, fontWeight: 700, color: C.fairway, fontFamily: sans, whiteSpace: "nowrap" }}>{es.yards != null ? `${Math.round(displayDistance(es.yards, distanceUnit))}${unitLabel}` : "—"}</span>
+                      </span>
+                    </button>
+                  )}
                 </div>
               ))}
 
@@ -3863,15 +3900,35 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
                   extraShots, anchored from the drive (or, previously, straight from the tee
                   if no drive existed yet — which silently mislabeled that first shot "S2"
                   instead of ever using the drive fields). Hiding it until there's a drive to
-                  anchor from removes the apparent redundancy and that mislabeling. */}
+                  anchor from removes the apparent redundancy and that mislabeling. Styled gold
+                  (25 Sep, per explicit request to use the palette's yellow/gold tone here) so
+                  the primary "what's next" action stands out from the ghost-styled shot
+                  controls above it. */}
               {hole.teeLat != null && cell.driveLat != null && (
                 <div style={{ position: "relative", marginTop: 8 }}>
-                  <button style={{ ...btnGhost, fontSize: 12.5, padding: "10px 8px", width: "100%", boxSizing: "border-box" }} onClick={() => onMarkNextShot(pid)}>
+                  <button
+                    style={{ ...btnGhost, fontSize: 12.5, padding: "10px 8px", width: "100%", boxSizing: "border-box", background: C.gold, borderColor: C.gold, color: C.ink, fontWeight: 700 }}
+                    onClick={() => onMarkNextShot(pid)}
+                  >
                     + Next shot
                   </button>
                   {alertPid === pid && !alertIsDrive && <ShotAlertBadge />}
                 </div>
               )}
+
+              {/* Putts — kept below the shot blocks (25 Sep, per explicit request: "keep the
+                  Number of Putts below the shots, as we wouldn't want to have to scroll up when
+                  getting to the green" — reversing the above-the-blocks placement from the
+                  initial per-shot-block redesign). */}
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
+                <span style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.03em", color: C.turf, fontFamily: sans }}>Putts</span>
+                <button
+                  onClick={() => setPuttPickerForPid(pid)}
+                  style={{ width: 48, height: 40, padding: 0, fontFamily: mono, fontSize: 15, fontWeight: 700, border: `1px solid ${C.line}`, borderRadius: 5, boxSizing: "border-box", background: C.white, color: C.ink, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
+                >
+                  {cell.putts !== "" && cell.putts != null ? cell.putts : "—"}
+                </button>
+              </div>
             </div>
           );
         })}
@@ -4109,12 +4166,23 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
     let result = null;
     setScores((prev) => {
       const cell = prev[pid]?.[hole.number] || {};
+      // auto-count strokes (25 Sep, per explicit report: "it does not seem to auto count the
+      // shots... Shots should be auto filled based on the button presses") — marking a shot bumps
+      // gross by 1, same ±1-delta pattern StrokeHoleCard's applyStrokePenalty already uses for
+      // penalty strokes, so the two stack correctly (a penalized drive = 1 for the drive + 1 for
+      // the penalty). Only counted the FIRST time the drive is marked — re-tapping "Mark drive"
+      // to correct/adjust an already-marked position is not a new stroke.
+      const wasAlreadyMarked = cell.driveLat != null;
       const anchor = hole.teeLat != null ? { lat: hole.teeLat, lon: hole.teeLon } : null;
       const yards = anchor ? haversineYards(anchor.lat, anchor.lon, pos.lat, pos.lon) : null;
       const aimGreen = greenAimPoint(pos.lat, pos.lon, hole, greenTarget);
       const remaining = aimGreen ? haversineYards(pos.lat, pos.lon, aimGreen.lat, aimGreen.lon) : null;
       result = { label: "Drive", yards, remaining };
       const nextCell = { ...cell, driveYards: yards != null ? Math.round(yards) : null, driveLat: pos.lat, driveLon: pos.lon };
+      if (!wasAlreadyMarked) {
+        const currentGross = cell.gross === "" || cell.gross == null ? 0 : Number(cell.gross);
+        nextCell.gross = String(currentGross + 1);
+      }
       return { ...prev, [pid]: { ...prev[pid], [hole.number]: nextCell } };
     });
     return result;
@@ -4136,7 +4204,11 @@ function PlayTab({ courses, players, setPlayers, rounds, setRounds, distanceUnit
       const remaining = aimGreen ? haversineYards(pos.lat, pos.lon, aimGreen.lat, aimGreen.lon) : null;
       result = { label: `Shot ${extra.length + 2}`, yards, remaining };
       const nextExtra = [...extra, { yards: yards != null ? Math.round(yards) : null, lat: pos.lat, lon: pos.lon, club: null }];
-      return { ...prev, [pid]: { ...prev[pid], [hole.number]: { ...cell, extraShots: nextExtra } } };
+      // +Next shot always records a genuinely new shot (there's no re-mark/adjust action for an
+      // already-recorded extra shot, unlike the drive above), so this always counts — same
+      // ±1-delta auto-count as recordStrokeDrive.
+      const currentGross = cell.gross === "" || cell.gross == null ? 0 : Number(cell.gross);
+      return { ...prev, [pid]: { ...prev[pid], [hole.number]: { ...cell, extraShots: nextExtra, gross: String(currentGross + 1) } } };
     });
     return result;
   }
