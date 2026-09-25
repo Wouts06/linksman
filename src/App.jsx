@@ -6006,12 +6006,18 @@ function HistoryTab({ rounds, players, courses, distanceUnit }) {
    logged in yet. Talks directly to register.php/login.php; onAuthed hands the resulting
    {token, user} back up to App(), which is responsible for saving it and syncing data. */
 function AuthGate({ onAuthed }) {
-  const [mode, setMode] = useState("login"); // "login" | "register"
+  // "forgot" (25 Sep) sits alongside login/register but isn't one of the tab
+  // buttons above the form — it's reached via the "Forgot password?" link
+  // under the password field in login mode, and returns to "login" via its
+  // own "‹ Back to log in" link, same pattern PenaltyPickerModal etc. use
+  // for a "this isn't really a peer option" sub-screen.
+  const [mode, setMode] = useState("login"); // "login" | "register" | "forgot"
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [forgotSent, setForgotSent] = useState(false);
 
   async function submit(e) {
     e.preventDefault();
@@ -6038,44 +6044,174 @@ function AuthGate({ onAuthed }) {
     }
   }
 
+  async function submitForgot(e) {
+    e.preventDefault();
+    setError("");
+    if (!email.trim()) { setError("Please enter your email."); return; }
+    setBusy(true);
+    try {
+      const res = await fetch(`${API_BASE}/forgot-password.php`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      // forgot-password.php always responds 200 with the same generic
+      // message (see its own comments) — this isn't skipping error handling,
+      // there's genuinely no error case to distinguish here on purpose.
+      await res.json().catch(() => ({}));
+      setForgotSent(true);
+      setBusy(false);
+    } catch (e2) {
+      setError("Couldn't reach the server. Check your connection and try again.");
+      setBusy(false);
+    }
+  }
+
+  function backToLogin() {
+    setMode("login");
+    setError("");
+    setForgotSent(false);
+  }
+
   return (
     <div style={{ minHeight: "100vh", background: C.paper, fontFamily: sans, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
       <div style={{ width: "100%", maxWidth: 360 }}>
         <div style={{ textAlign: "center", marginBottom: 22 }}>
           <div style={{ fontFamily: serif, fontSize: 30, color: C.fairway }}>Linksman</div>
-          <div style={{ fontFamily: sans, fontSize: 13, color: C.turf, marginTop: 2 }}>Sign in to sync your rounds across devices</div>
+          <div style={{ fontFamily: sans, fontSize: 13, color: C.turf, marginTop: 2 }}>
+            {mode === "forgot" ? "Reset your password" : "Sign in to sync your rounds across devices"}
+          </div>
         </div>
 
-        <div style={{ display: "flex", gap: 2, background: C.paper2, borderRadius: 6, padding: 3, marginBottom: 18 }}>
-          {[["login", "Log in"], ["register", "Create account"]].map(([key, label]) => (
-            <button
-              key={key}
-              onClick={() => { setMode(key); setError(""); }}
-              style={{
-                flex: 1, fontFamily: sans, fontSize: 13.5, fontWeight: 700, padding: "9px 8px", borderRadius: 5, border: "none", cursor: "pointer",
-                background: mode === key ? C.white : "transparent",
-                color: mode === key ? C.fairway : C.turf,
-              }}
-            >
-              {label}
+        {mode !== "forgot" && (
+          <div style={{ display: "flex", gap: 2, background: C.paper2, borderRadius: 6, padding: 3, marginBottom: 18 }}>
+            {[["login", "Log in"], ["register", "Create account"]].map(([key, label]) => (
+              <button
+                key={key}
+                onClick={() => { setMode(key); setError(""); }}
+                style={{
+                  flex: 1, fontFamily: sans, fontSize: 13.5, fontWeight: 700, padding: "9px 8px", borderRadius: 5, border: "none", cursor: "pointer",
+                  background: mode === key ? C.white : "transparent",
+                  color: mode === key ? C.fairway : C.turf,
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {mode === "forgot" ? (
+          forgotSent ? (
+            <div style={{ display: "grid", gap: 14 }}>
+              <div style={{ fontFamily: sans, fontSize: 13.5, color: C.ink, background: C.paper2, border: `1px solid ${C.line}`, borderRadius: 6, padding: "12px 14px", lineHeight: 1.4 }}>
+                If an account exists for <b>{email}</b>, a reset link has been sent — check your inbox (and spam folder). The link is valid for 1 hour.
+              </div>
+              <button style={{ ...btnGhost, width: "100%", boxSizing: "border-box" }} onClick={backToLogin}>‹ Back to log in</button>
+            </div>
+          ) : (
+            <form onSubmit={submitForgot} style={{ display: "grid", gap: 10 }}>
+              <div style={{ fontFamily: sans, fontSize: 12.5, color: C.turf, marginBottom: 2 }}>Enter your account email and we'll send you a link to set a new password.</div>
+              <input style={inputStyle} type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" />
+              {error && (
+                <div style={{ fontFamily: sans, fontSize: 13, color: C.flag, background: "rgba(178,58,46,0.08)", border: `1px solid ${C.flag}`, borderRadius: 5, padding: "8px 10px" }}>{error}</div>
+              )}
+              <button type="submit" disabled={busy} style={{ ...btnPrimary, width: "100%", boxSizing: "border-box", marginTop: 4 }}>
+                {busy ? "Please wait…" : "Send reset link"}
+              </button>
+              <button type="button" style={{ ...btnGhost, width: "100%", boxSizing: "border-box" }} onClick={backToLogin}>‹ Back to log in</button>
+            </form>
+          )
+        ) : (
+          <form onSubmit={submit} style={{ display: "grid", gap: 10 }}>
+            {mode === "register" && (
+              <input style={inputStyle} placeholder="Your name" value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" />
+            )}
+            <input style={inputStyle} type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" />
+            <input style={inputStyle} type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={mode === "login" ? "current-password" : "new-password"} />
+            {mode === "register" && (
+              <div style={{ fontFamily: sans, fontSize: 11.5, color: C.turf }}>At least 8 characters.</div>
+            )}
+            {mode === "login" && (
+              <button
+                type="button"
+                onClick={() => { setMode("forgot"); setError(""); }}
+                style={{ background: "none", border: "none", padding: 0, fontFamily: sans, fontSize: 12.5, color: C.turf, textDecoration: "underline", cursor: "pointer", justifySelf: "start" }}
+              >
+                Forgot password?
+              </button>
+            )}
+            {error && (
+              <div style={{ fontFamily: sans, fontSize: 13, color: C.flag, background: "rgba(178,58,46,0.08)", border: `1px solid ${C.flag}`, borderRadius: 5, padding: "8px 10px" }}>{error}</div>
+            )}
+            <button type="submit" disabled={busy} style={{ ...btnPrimary, width: "100%", boxSizing: "border-box", marginTop: 4 }}>
+              {busy ? "Please wait…" : mode === "login" ? "Log in" : "Create account"}
             </button>
-          ))}
-        </div>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
 
+/* Shown instead of AuthGate/the main app whenever the page loads with a
+   ?reset_token=... in the URL (see App()'s resetToken state and the emailed
+   link built in forgot-password.php). Submitting hands back {token, user}
+   exactly like AuthGate's onAuthed does, so App() can treat "reset a
+   password" and "log in" identically from that point on — reset-password.php
+   already logs the account in with the new password as part of resetting it. */
+function ResetPasswordScreen({ token, onDone }) {
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(e) {
+    e.preventDefault();
+    setError("");
+    if (password.length < 8) { setError("Password must be at least 8 characters."); return; }
+    if (password !== confirm) { setError("Passwords don't match."); return; }
+    setBusy(true);
+    try {
+      const res = await fetch(`${API_BASE}/reset-password.php`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token, password }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(body?.error || "Something went wrong — please try again.");
+        setBusy(false);
+        return;
+      }
+      // drop ?reset_token=... from the address bar so refreshing (or someone
+      // finding this link again in browser history) doesn't reopen this
+      // screen — the token is single-use server-side anyway, but there's no
+      // reason to leave it sitting in the URL once it's been spent
+      window.history.replaceState({}, "", window.location.pathname);
+      onDone(body.token, body.user);
+    } catch (e2) {
+      setError("Couldn't reach the server. Check your connection and try again.");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div style={{ minHeight: "100vh", background: C.paper, fontFamily: sans, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <div style={{ width: "100%", maxWidth: 360 }}>
+        <div style={{ textAlign: "center", marginBottom: 22 }}>
+          <div style={{ fontFamily: serif, fontSize: 30, color: C.fairway }}>Linksman</div>
+          <div style={{ fontFamily: sans, fontSize: 13, color: C.turf, marginTop: 2 }}>Choose a new password</div>
+        </div>
         <form onSubmit={submit} style={{ display: "grid", gap: 10 }}>
-          {mode === "register" && (
-            <input style={inputStyle} placeholder="Your name" value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" />
-          )}
-          <input style={inputStyle} type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" />
-          <input style={inputStyle} type="password" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={mode === "login" ? "current-password" : "new-password"} />
-          {mode === "register" && (
-            <div style={{ fontFamily: sans, fontSize: 11.5, color: C.turf }}>At least 8 characters.</div>
-          )}
+          <input style={inputStyle} type="password" placeholder="New password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" />
+          <input style={inputStyle} type="password" placeholder="Confirm new password" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" />
+          <div style={{ fontFamily: sans, fontSize: 11.5, color: C.turf }}>At least 8 characters.</div>
           {error && (
             <div style={{ fontFamily: sans, fontSize: 13, color: C.flag, background: "rgba(178,58,46,0.08)", border: `1px solid ${C.flag}`, borderRadius: 5, padding: "8px 10px" }}>{error}</div>
           )}
           <button type="submit" disabled={busy} style={{ ...btnPrimary, width: "100%", boxSizing: "border-box", marginTop: 4 }}>
-            {busy ? "Please wait…" : mode === "login" ? "Log in" : "Create account"}
+            {busy ? "Please wait…" : "Set new password"}
           </button>
         </form>
       </div>
@@ -6127,6 +6263,13 @@ export default function App() {
   const [authUser, setAuthUserState] = useState(null);
   const authTokenRef = useRef(null);
   const [accountOpen, setAccountOpen] = useState(false);
+  /* set once, at first render, from ?reset_token=... in the URL (the link a
+     "forgot password" email points at — see forgot-password.php). Read with
+     a lazy useState initializer rather than an effect so it's available for
+     the very first render, before the loaded/authUser gates below decide
+     what to show — a password-reset link should win over both "still
+     loading" and "already logged in as someone else" states. */
+  const [resetToken, setResetToken] = useState(() => new URLSearchParams(window.location.search).get('reset_token'));
 
   useEffect(() => { if (!compact) setMenuOpen(false); }, [compact]);
 
@@ -6245,6 +6388,20 @@ export default function App() {
       );
     });
   }, []);
+
+  /* takes priority over the loading/login gates below — someone arriving via
+     a password-reset email link should see that screen immediately, whether
+     or not they're already logged in as some account on this device (e.g.
+     the link was opened on a shared/different browser) or the usual
+     localStorage hydration has finished yet. */
+  if (resetToken) {
+    return (
+      <ResetPasswordScreen
+        token={resetToken}
+        onDone={(token, user) => { handleAuthed(token, user); setResetToken(null); }}
+      />
+    );
+  }
 
   if (!loaded) {
     return <div style={{ padding: 40, fontFamily: sans, color: C.turf }}>Loading…</div>;

@@ -27,6 +27,18 @@ CREATE TABLE IF NOT EXISTS sessions (
   CONSTRAINT fk_sessions_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Password reset requests. A row = one emailed reset link, valid for 1 hour
+-- and single-use (deleted the moment it's used, or once it's expired).
+CREATE TABLE IF NOT EXISTS password_resets (
+  token CHAR(64) NOT NULL,
+  user_id INT UNSIGNED NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  expires_at DATETIME NOT NULL,
+  PRIMARY KEY (token),
+  KEY idx_user_id (user_id),
+  CONSTRAINT fk_password_resets_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- The app's actual data, stored the same shape it already uses in the browser's
 -- localStorage (one JSON blob per key: courses / players / rounds / settings /
 -- mePlayerId / rangefinderDefault). Keeping the same shape server-side means the

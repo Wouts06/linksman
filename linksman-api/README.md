@@ -98,6 +98,30 @@ steps 1–4 (wrong file location, or `config.php` missing/wrong).
 | `login.php` | `POST` `{email, password}` → returns a login token. |
 | `logout.php` | `POST` with `Authorization: Bearer <token>` → invalidates that token. |
 | `data.php` | `GET`/`POST` with `Authorization: Bearer <token>` → reads/writes the account's saved app data. |
+| `forgot-password.php` | `POST` `{email}` → always returns the same generic "if an account exists..." message; emails a reset link if it does. |
+| `reset-password.php` | `POST` `{token, password}` → sets a new password from a reset link, logs the account in, and returns a login token. |
+
+## Adding password reset to an already-deployed install
+
+If you set up `linksman-api` before this feature existed, two things need to
+happen — both safe to do even though real accounts already exist:
+
+1. Re-run `schema.sql` in phpMyAdmin's SQL tab (paste the whole file again).
+   Every table is created with `IF NOT EXISTS`, so your existing `users`,
+   `sessions`, and `user_data` tables and their data are left untouched —
+   this just adds the new `password_resets` table.
+2. Upload the two new files, `forgot-password.php` and `reset-password.php`,
+   into the same `linksman-api` folder as the others. No changes to
+   `config.php` are needed — the reset email's link is built from
+   `ALLOWED_ORIGIN`, which is already set.
+
+Password reset emails are sent with PHP's built-in `mail()` function, using
+whatever mail setup your InterWorx hosting already has — no extra
+credentials or config needed. The tradeoff is that a brand-new sending
+address (`noreply@tarakona.co.za`) can land in spam the first few times,
+especially at Gmail/Outlook, until it builds up a sending reputation. If a
+reset email doesn't show up within a minute or two, check spam before
+assuming something's broken.
 
 ## Security notes
 
