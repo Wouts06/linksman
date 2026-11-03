@@ -17,9 +17,17 @@
 // (up to 80km) radius around a point, which is a much bigger area than the OSM primary API's
 // bbox-size cap allows, and that API has no "search within a radius" query at all — Overpass's
 // `around:` is genuinely the only free tool for this specific query shape.
+//
+// Third mirror added same day, same round, after live testing showed BOTH of the above failing
+// at once (private.coffee timing out completely, overpass-api.de returning HTTP 502) — confirmed
+// via the OSM wiki's own current "Public Overpass API instances" table (not secondhand reports
+// this time) as the one other free, worldwide-coverage, no-stated-rate-limit instance available:
+// run by VK (maps.mail.ru), a large Russian internet company. Worth knowing, not worth avoiding
+// for a personal golf app — it's just another public mirror, same trust model as the other two.
 const OVERPASS_ENDPOINTS = [
   "https://overpass.private.coffee/api/interpreter",
   "https://overpass-api.de/api/interpreter",
+  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ];
 
 export default async function handler(req, res) {
@@ -50,7 +58,13 @@ export default async function handler(req, res) {
           "Accept-Language": "en-US",
           "User-Agent": "Linksman-Golf-App/1.0 (personal golf scoring app; contact: wouter0006@gmail.com)",
         },
-        signal: AbortSignal.timeout(20000),
+        // Trimmed from 20s to 12s per mirror (3 Nov, third-mirror round) — with 3 mirrors now
+        // tried in sequence, a full round of failures at the old 20s each could take up to a
+        // minute; 12s keeps a worst case under 40s while still being generous for a normal
+        // response (Overpass queries here are small and typically answer in well under a second
+        // when a mirror is healthy — the only time this limit matters is a mirror that's already
+        // struggling, i.e. exactly the case being guarded against).
+        signal: AbortSignal.timeout(12000),
       });
       if (!upstream.ok) {
         errors.push(`${endpoint} -> HTTP ${upstream.status}`);

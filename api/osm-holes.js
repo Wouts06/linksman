@@ -59,9 +59,13 @@
 // "no rate limit" (vs. overpass-api.de's documented <10,000 req/day cap and its own well-known,
 // ongoing reliability problems since late 2025 — frequent 504s/timeouts under load). overpass-
 // api.de stays as a last-resort fallback purely for mirror diversity.
+// Third mirror added same day, same round (see api/osm-nearby.js's longer comment on this one)
+// — live testing showed both mirrors above failing at once, so a third, confirmed-current free
+// worldwide instance (VK/maps.mail.ru) was added from the OSM wiki's own instance table.
 const OVERPASS_ENDPOINTS = [
   "https://overpass.private.coffee/api/interpreter",
   "https://overpass-api.de/api/interpreter",
+  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ];
 
 // Every golf=* tag/geometry combination this endpoint fetches. Centralized here so the area
@@ -178,7 +182,12 @@ async function runQuery(query) {
           // Identifies this app to Overpass, same rationale as the Nominatim proxy above.
           "User-Agent": "Linksman-Golf-App/1.0 (personal golf scoring app; contact: wouter0006@gmail.com)",
         },
-        signal: AbortSignal.timeout(20000),
+        // Trimmed from 20s to 12s per mirror (3 Nov, third-mirror round — see api/osm-nearby.js's
+        // comment on the same change). Matters even more here: the handler below can call
+        // runQuery TWICE in the worst case (an area query, then a bbox fallback if that comes
+        // back empty), on top of the primary-API attempt that runs first — at the old 20s per
+        // mirror that's up to 2 minutes of sequential waiting before giving up entirely.
+        signal: AbortSignal.timeout(12000),
       });
       if (!upstream.ok) {
         errors.push(`${endpoint} -> HTTP ${upstream.status}`);
