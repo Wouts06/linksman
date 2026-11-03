@@ -161,7 +161,11 @@ async function fetchFromPrimaryAPI(south, north, west, east) {
 }
 
 async function runQuery(query) {
-  let lastError = null;
+  // Collects EVERY mirror's own failure, not just the last one (3 Nov, diagnostics round, same
+  // fix as api/osm-nearby.js — see that file's comment) — a single overwritten lastError made
+  // "every mirror is actually failing" indistinguishable from "only the last one had a bad day"
+  // in the error response, which mattered once both current mirrors started failing at once.
+  const errors = [];
   for (const endpoint of OVERPASS_ENDPOINTS) {
     try {
       const upstream = await fetch(endpoint, {
@@ -177,15 +181,15 @@ async function runQuery(query) {
         signal: AbortSignal.timeout(20000),
       });
       if (!upstream.ok) {
-        lastError = new Error(`Overpass ${endpoint} responded ${upstream.status}`);
+        errors.push(`${endpoint} -> HTTP ${upstream.status}`);
         continue; // try the next mirror — 406/429/504 here is transient/anti-abuse, not "no data"
       }
       return { data: await upstream.json(), error: null };
     } catch (e) {
-      lastError = e; // network error or our own timeout — try the next mirror
+      errors.push(`${endpoint} -> ${e && e.name === "TimeoutError" ? "timed out" : (e && e.message) || "unknown error"}`);
     }
   }
-  return { data: null, error: lastError };
+  return { data: null, error: errors.length ? new Error(errors.join("; ")) : null };
 }
 
 export default async function handler(req, res) {

@@ -33,7 +33,12 @@ export default async function handler(req, res) {
 
   const query = `[out:json][timeout:25];nwr["leisure"="golf_course"](around:${radius},${lat},${lon});out center tags;`;
 
-  let lastError = null;
+  // Collects EVERY mirror's own failure (3 Nov, diagnostics round) rather than just the last one
+  // — a single `lastError` silently threw away the first mirror's actual reason every time a
+  // later one also failed, which made a real "both mirrors failing right now" situation look
+  // identical to "the last mirror alone is having a bad day" in the error response. Needed this
+  // to figure out what's actually going wrong after reordering the mirrors didn't fix it.
+  const errors = [];
   for (const endpoint of OVERPASS_ENDPOINTS) {
     try {
       const upstream = await fetch(endpoint, {
@@ -48,7 +53,7 @@ export default async function handler(req, res) {
         signal: AbortSignal.timeout(20000),
       });
       if (!upstream.ok) {
-        lastError = new Error(`Overpass ${endpoint} responded ${upstream.status}`);
+        errors.push(`${endpoint} -> HTTP ${upstream.status}`);
         continue; // try the next mirror — 406/429/504 here is transient/anti-abuse, not "no data"
       }
       const data = await upstream.json();
@@ -56,11 +61,11 @@ export default async function handler(req, res) {
       res.status(200).json(data);
       return;
     } catch (e) {
-      lastError = e; // network error or our own timeout — try the next mirror
+      errors.push(`${endpoint} -> ${e && e.name === "TimeoutError" ? "timed out" : (e && e.message) || "unknown error"}`);
     }
   }
   res.status(502).json({
     error: "All Overpass endpoints failed",
-    detail: lastError ? lastError.message : null,
+    detail: errors.join("; "),
   });
 }
