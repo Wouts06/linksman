@@ -1015,6 +1015,41 @@ function parseOSMHoleElements(data) {
     }
   }
 
+  // golf=bunker / golf=water_hazard / golf=lateral_water_hazard elements (3 Nov, bunker-distance
+  // round) — same polygon shape as a green, but unlike a green there can legitimately be several
+  // per hole (and a hole can have none), so these collect into an ARRAY per hole rather than a
+  // single polygon. Matched to a hole via nearestHoleNumber's "both" anchor (see that function's
+  // comment) since a bunker can sit anywhere along the hole's corridor, not just near the green.
+  // Per the OSM wiki, these have no parent-relation grouping at all — course membership is purely
+  // implied by location — so this spatial match is the only option, same as tees/greens, and
+  // coverage is noticeably patchier than tees/greens even on well-mapped courses.
+  function collectPolygons(golfValue) {
+    const byHole = new Map(); // hole number -> array of vertex arrays
+    for (const el of elements.filter((e) => (e.tags || {}).golf === golfValue)) {
+      const geom = el.geometry && el.geometry.length ? el.geometry : (el.lat != null ? [{ lat: el.lat, lon: el.lon }] : []);
+      if (geom.length < 1) continue;
+      const centroidLat = geom.reduce((s, p) => s + p.lat, 0) / geom.length;
+      const centroidLon = geom.reduce((s, p) => s + p.lon, 0) / geom.length;
+      const number = nearestHoleNumber(centroidLat, centroidLon, holes, "both");
+      if (number == null) continue;
+      const vertices = geom.map((p) => ({ lat: p.lat, lon: p.lon }));
+      if (!byHole.has(number)) byHole.set(number, []);
+      byHole.get(number).push(vertices);
+    }
+    return byHole;
+  }
+  const bunkersByHole = collectPolygons("bunker");
+  const waterByHole = collectPolygons("water_hazard");
+  const lateralByHole = collectPolygons("lateral_water_hazard");
+  for (const h of holes) {
+    h.bunkers = bunkersByHole.get(h.number) || null;
+    const hazards = [
+      ...(waterByHole.get(h.number) || []).map((vertices) => ({ kind: "water_hazard", vertices })),
+      ...(lateralByHole.get(h.number) || []).map((vertices) => ({ kind: "lateral_water_hazard", vertices })),
+    ];
+    h.hazards = hazards.length ? hazards : null;
+  }
+
   // golf=tee elements: a node has lat/lon directly; an area (way/multipolygon) is returned as
   // a geometry ring by `out geom`, so its center is approximated as the average of its
   // vertices — plenty precise for "which tee box is this," not meant to be exact-centroid.
@@ -1096,11 +1131,19 @@ function parseOSMHoleElements(data) {
 function nearestHoleNumber(lat, lon, holes, anchor = "tee") {
   let best = null, bestDist = Infinity;
   for (const h of holes) {
-    const aLat = anchor === "green" ? h.greenLat : h.teeLat;
-    const aLon = anchor === "green" ? h.greenLon : h.teeLon;
-    if (aLat == null || aLon == null) continue;
-    const d = haversineMeters(lat, lon, aLat, aLon);
-    if (d < bestDist) { bestDist = d; best = h.number; }
+    // "both" (added for bunker/hazard matching, 3 Nov) — unlike a tee marker or a green, a
+    // bunker can sit anywhere along a hole's corridor (greenside, fairway, even near the tee),
+    // so comparing against only one end of the hole would wrongly favor a neighboring hole's
+    // closer end. Comparing against whichever of this hole's own tee/green is nearer approximates
+    // "which hole's corridor is this actually inside of" much better than either end alone.
+    const candidates = anchor === "both"
+      ? [[h.teeLat, h.teeLon], [h.greenLat, h.greenLon]]
+      : [[anchor === "green" ? h.greenLat : h.teeLat, anchor === "green" ? h.greenLon : h.teeLon]];
+    for (const [aLat, aLon] of candidates) {
+      if (aLat == null || aLon == null) continue;
+      const d = haversineMeters(lat, lon, aLat, aLon);
+      if (d < bestDist) { bestDist = d; best = h.number; }
+    }
   }
   return best;
 }
@@ -1659,6 +1702,27 @@ function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, d
      whole map by -bearing brings that direction to visually point "up", like a rangefinder. */
   const lineBearing = bearingDeg(pos?.lat ?? anchorLat, pos?.lng ?? anchorLon, aimGreen?.lat, aimGreen?.lon);
   const cssRotateDeg = rotateToLine && lineBearing != null ? -lineBearing : 0;
+  /* bunker carry distances (3 Nov) — "front edge" (nearest polygon vertex, where the sand
+     actually starts) and "far edge" (farthest vertex, i.e. what you'd need to clear to be fully
+     past it) measured from the SAME anchor point as shotYards above (the tee, or wherever the
+     previous shot landed) — this is "can I clear it from here", not "how far is it from where I
+     just landed", so it's deliberately not tied to `pos`. Reuses the exact nearestVertexFrom/
+     farthestVertexFrom helpers the green front/back toggle already uses, just pointed at a
+     bunker's polygon instead of the green's. */
+  const bunkerDistances = (hole.bunkers || [])
+    .map((vertices) => {
+      if (anchorLat == null || !vertices?.length) return null;
+      const front = nearestVertexFrom(anchorLat, anchorLon, vertices);
+      const back = farthestVertexFrom(anchorLat, anchorLon, vertices);
+      if (!front || !back) return null;
+      return {
+        vertices,
+        frontYards: haversineYards(anchorLat, anchorLon, front.lat, front.lon),
+        backYards: haversineYards(anchorLat, anchorLon, back.lat, back.lon),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.frontYards - b.frontYards);
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(20,20,16,0.55)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 14 }}>
@@ -1680,6 +1744,16 @@ function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, d
                 url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
                 attribution="Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community"
               />
+              {/* bunkers/hazards (3 Nov) — bunkers use the existing C.brass accent (close enough
+                 to sand at low opacity, and keeps this map on the app's own palette); hazards
+                 use a literal steel-blue since the palette has no water-ish color defined — a
+                 one-off map overlay color, not a UI chrome color, so it doesn't need to be in C. */}
+              {(hole.bunkers || []).map((vertices, i) => (
+                <Polygon key={`bunker-${i}`} positions={vertices.map((p) => [p.lat, p.lon])} pathOptions={{ color: C.brass, weight: 1, fillColor: C.brass, fillOpacity: 0.45 }} />
+              ))}
+              {(hole.hazards || []).map((hz, i) => (
+                <Polygon key={`hazard-${i}`} positions={hz.vertices.map((p) => [p.lat, p.lon])} pathOptions={{ color: "#2f6f8f", weight: 1, fillColor: "#2f6f8f", fillOpacity: 0.4 }} />
+              ))}
               {anchorLat != null && <Marker position={[anchorLat, anchorLon]} icon={teeIcon} />}
               {aimGreen && <Marker position={[aimGreen.lat, aimGreen.lon]} icon={greenIcon} />}
               {pos && <Marker position={pos} icon={landingIcon} />}
@@ -1687,6 +1761,16 @@ function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, d
             </MapContainer>
           </div>
         </div>
+        {bunkerDistances.length > 0 && (
+          <div style={{ fontFamily: sans, fontSize: 11.5, color: C.turf, marginTop: 8, display: "flex", flexDirection: "column", gap: 2 }}>
+            <span style={{ fontWeight: 700, color: C.ink }}>⛳ Bunkers from here:</span>
+            {bunkerDistances.map((b, i) => (
+              <span key={i}>
+                Bunker {i + 1}: <b style={{ color: C.ink }}>{Math.round(displayDistance(b.frontYards, distanceUnit))}–{Math.round(displayDistance(b.backYards, distanceUnit))} {unitLabel}</b> to carry
+              </span>
+            ))}
+          </div>
+        )}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
           <button
             onClick={() => setRotateToLine((v) => !v)}
@@ -2268,7 +2352,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
   const [manualLat, setManualLat] = useState("");
   const [manualLon, setManualLon] = useState("");
   const [holes, setHoles] = useState(
-    Array.from({ length: 18 }, (_, i) => ({ number: i + 1, par: 4, yardage: "", strokeIndex: "", teeLat: null, teeLon: null, greenLat: null, greenLon: null, greenPolygon: null }))
+    Array.from({ length: 18 }, (_, i) => ({ number: i + 1, par: 4, yardage: "", strokeIndex: "", teeLat: null, teeLon: null, greenLat: null, greenLon: null, greenPolygon: null, bunkers: null, hazards: null }))
   );
   const [osmQuery, setOsmQuery] = useState("");
   const [osmResults, setOsmResults] = useState([]);
@@ -2412,6 +2496,12 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
           // this hole — carried through to saveCourse below so live in-round distances can
           // recompute "back of the green" from the player's own position (see greenAimPoint)
           greenPolygon: found?.greenPolygon ?? null,
+          // bunker/hazard polygons (3 Nov), same "carry through to saveCourse" treatment —
+          // an array of polygons for bunkers (several possible per hole) and an array of
+          // {kind, vertices} for water/lateral-water hazards; null for either when OSM has
+          // nothing mapped for this hole, which is the common case.
+          bunkers: found?.bunkers ?? null,
+          hazards: found?.hazards ?? null,
         };
       });
       const gpsCount = osmHoles.filter((h) => h.greenLat != null).length;
@@ -2544,7 +2634,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
 
   function resetForm() {
     setName(""); setNumHoles(18); setRating(""); setSlope(""); setManualLat(""); setManualLon("");
-    setHoles(Array.from({ length: 18 }, (_, i) => ({ number: i + 1, par: 4, yardage: "", strokeIndex: "", teeLat: null, teeLon: null, greenLat: null, greenLon: null, greenPolygon: null })));
+    setHoles(Array.from({ length: 18 }, (_, i) => ({ number: i + 1, par: 4, yardage: "", strokeIndex: "", teeLat: null, teeLon: null, greenLat: null, greenLon: null, greenPolygon: null, bunkers: null, hazards: null })));
     setOsmQuery(""); setOsmResults([]); setOsmStatus(""); setOsmFailed(false); setLastOSMCandidate(null); setOsmFromCache(false);
     setTeeColor("White"); setExtraTees([]); setPrimaryFromOSM(false);
     setRatingSource(null);
@@ -2552,7 +2642,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
   }
   function updateHoleCount(n) {
     setNumHoles(n);
-    setHoles(Array.from({ length: n }, (_, i) => holes[i] || { number: i + 1, par: 4, yardage: "", strokeIndex: "", teeLat: null, teeLon: null, greenLat: null, greenLon: null, greenPolygon: null }));
+    setHoles(Array.from({ length: n }, (_, i) => holes[i] || { number: i + 1, par: 4, yardage: "", strokeIndex: "", teeLat: null, teeLon: null, greenLat: null, greenLon: null, greenPolygon: null, bunkers: null, hazards: null }));
   }
   function updateHole(i, field, val) {
     const next = [...holes];
@@ -2637,6 +2727,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
         number: h.number, par: Number(h.par) || 4, yardage: h.yardage ? Number(h.yardage) : null, strokeIndex: h.strokeIndex ? Number(h.strokeIndex) : null,
         teeLat: h.teeLat ?? null, teeLon: h.teeLon ?? null, greenLat: h.greenLat ?? null, greenLon: h.greenLon ?? null,
         greenPolygon: h.greenPolygon ?? null,
+        bunkers: h.bunkers ?? null, hazards: h.hazards ?? null,
       })),
       tees,
     };

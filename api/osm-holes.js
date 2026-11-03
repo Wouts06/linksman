@@ -34,12 +34,41 @@
 // point (and, live during a round, to recompute which polygon vertex counts as "back" from the
 // player's current position/angle of approach) instead of a single fixed point. Same
 // not-every-course caveat applies — an empty green-polygon result is common and not a bug.
+//
+// Also fetches `golf=bunker`, `golf=water_hazard`, and `golf=lateral_water_hazard` elements
+// (3 Nov, bunker-distance round) — bunker outlines and hazard outlines, same polygon shape as
+// greens. Bunkers are tagged as ways per the OSM wiki (nodes are discouraged but still occur in
+// the wild on some tiny/unmapped-as-area bunkers, so both are queried); hazards are ways. The
+// client (parseOSMHoleElements in App.jsx) matches each polygon to its nearest hole the same way
+// it already matches green polygons, and reuses the existing nearest/farthest-vertex distance
+// math for "distance to front/back of bunker" instead of new math. Per the wiki, OSM does not
+// group these under a parent relation the way `golf=hole` can be grouped under `golf=course` —
+// their course membership is implied purely by location — so coverage is noticeably patchier
+// than tees/greens for courses that are only lightly mapped. An empty result is common, not a bug.
 
 const OVERPASS_ENDPOINTS = [
   "https://overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter", // most reliable public mirror as of 2026
   "https://overpass.private.coffee/api/interpreter", // independent mirror
 ];
+
+// Every golf=* tag/geometry combination this endpoint fetches. Centralized here so the area
+// query and the bounding-box query (below) can't drift out of sync with each other.
+const GOLF_FILTERS = [
+  { type: "way", value: "hole" },
+  { type: "node", value: "tee" },
+  { type: "way", value: "tee" },
+  { type: "node", value: "green" },
+  { type: "way", value: "green" },
+  { type: "way", value: "bunker" },
+  { type: "node", value: "bunker" }, // discouraged by the wiki but seen in practice; harmless to include
+  { type: "way", value: "water_hazard" },
+  { type: "way", value: "lateral_water_hazard" },
+];
+
+function buildFilters(scope) {
+  return GOLF_FILTERS.map(({ type, value }) => `${type}["golf"="${value}"]${scope};`).join("");
+}
 
 async function runQuery(query) {
   let lastError = null;
@@ -79,7 +108,7 @@ export default async function handler(req, res) {
   const bboxQuery = hasBbox
     ? (() => {
         const [south, north, west, east] = bboxNums;
-        return `[out:json][timeout:25];(way["golf"="hole"](${south},${west},${north},${east});node["golf"="tee"](${south},${west},${north},${east});way["golf"="tee"](${south},${west},${north},${east});node["golf"="green"](${south},${west},${north},${east});way["golf"="green"](${south},${west},${north},${east}););out geom;`;
+        return `[out:json][timeout:25];(${buildFilters(`(${south},${west},${north},${east})`)});out geom;`;
       })()
     : null;
 
@@ -90,7 +119,7 @@ export default async function handler(req, res) {
 
   if (hasArea) {
     const ref = osmType === "way" ? `way(${osmId})` : `relation(${osmId})`;
-    const areaQuery = `[out:json][timeout:25];${ref};map_to_area->.a;(way["golf"="hole"](area.a);node["golf"="tee"](area.a);way["golf"="tee"](area.a);node["golf"="green"](area.a);way["golf"="green"](area.a););out geom;`;
+    const areaQuery = `[out:json][timeout:25];${ref};map_to_area->.a;(${buildFilters("(area.a)")});out geom;`;
     const areaResult = await runQuery(areaQuery);
     if (areaResult.data && (areaResult.data.elements || []).length > 0) {
       res.status(200).json(areaResult.data);
