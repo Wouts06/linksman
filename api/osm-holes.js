@@ -6,9 +6,12 @@
 //
 // Usage: GET /api/osm-holes?south=<lat>&north=<lat>&west=<lon>&east=<lon>
 //     or: GET /api/osm-holes?osmType=way|relation&osmId=<id>&south=...&north=...&west=...&east=...
-// Returns: the raw Overpass JSON (the `elements` array), unchanged, so the client-side
-// parseOSMHoleElements() logic doesn't need to know anything moved. Tries each mirror in turn
-// before giving up, exactly like the old client-side fallback did.
+// Returns: an Overpass-shaped `{elements: [...]}` payload, so the client-side
+// parseOSMHoleElements() logic doesn't need to know anything moved — as of 3 Nov, that payload
+// can come from either OSM's own primary API (tried first when a bbox is given, see
+// fetchFromPrimaryAPI below — always-fresh, no mirror involved) or Overpass itself, converted
+// to look identical either way. Tries each Overpass mirror in turn before giving up, exactly
+// like the old client-side fallback did.
 //
 // When osmType/osmId identify the specific course (a way or relation, i.e. anything with real
 // mapped geometry — not a bare node), the query is restricted to holes actually WITHIN that
@@ -46,10 +49,19 @@
 // their course membership is implied purely by location — so coverage is noticeably patchier
 // than tees/greens for courses that are only lightly mapped. An empty result is common, not a bug.
 
+// Reordered 3 Nov (reliability round) — overpass.kumi.systems, previously listed first, has
+// been reported (OSM community forum, Mar 2026) to be serving corrupted/severely outdated data,
+// which is a worse failure mode than an outright error: runQuery below returns the FIRST mirror
+// that responds 200, with no way to tell a stale answer from a fresh one, so a bad mirror earlier
+// in this list can silently mask a working one later in it. Dropped entirely rather than kept as
+// a lower-priority fallback, since serving stale data is exactly the complaint this round is
+// fixing. overpass.private.coffee goes first: it's run by a non-profit specifically advertising
+// "no rate limit" (vs. overpass-api.de's documented <10,000 req/day cap and its own well-known,
+// ongoing reliability problems since late 2025 — frequent 504s/timeouts under load). overpass-
+// api.de stays as a last-resort fallback purely for mirror diversity.
 const OVERPASS_ENDPOINTS = [
+  "https://overpass.private.coffee/api/interpreter",
   "https://overpass-api.de/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter", // most reliable public mirror as of 2026
-  "https://overpass.private.coffee/api/interpreter", // independent mirror
 ];
 
 // Every golf=* tag/geometry combination this endpoint fetches. Centralized here so the area
@@ -68,6 +80,84 @@ const GOLF_FILTERS = [
 
 function buildFilters(scope) {
   return GOLF_FILTERS.map(({ type, value }) => `${type}["golf"="${value}"]${scope};`).join("");
+}
+
+// The exact golf=* values this endpoint cares about, derived from GOLF_FILTERS — used below to
+// filter the primary API's unfiltered bbox dump down to just these, client-side.
+const GOLF_VALUES = new Set(GOLF_FILTERS.map((f) => f.value));
+
+// Maximum bbox area (square degrees) to try against the primary API before falling back
+// straight to Overpass — OSM's own documented cap is 0.25; this stays comfortably under it
+// since the cap "may change at any time" per the wiki, and every real caller here is a single
+// course's own small box anyway (a golf course bbox padded generously is still only ~0.002-0.01
+// square degrees — this ceiling is a safety net for an unexpectedly large box, not a normal case).
+const PRIMARY_API_MAX_AREA = 0.2;
+
+/* Tries OpenStreetMap's own primary API (the same one iD/JOSM editors read and write through)
+   directly, instead of Overpass, for a small bounding box (3 Nov, reliability round). Added
+   because of two separate, real problems with the three Overpass mirrors above: (1) they've had
+   documented reliability issues (timeouts, 504s) since late 2025, and (2) — the one that actually
+   explains "OSM shows my edit but the app doesn't" — Overpass mirrors only re-sync from the main
+   database on their own periodic schedule (typically described as "a couple of minutes" but
+   observed, in practice, to be anywhere from minutely to once-daily depending on the mirror), so
+   a change made moments ago on osm.org can be genuinely absent from every Overpass mirror for a
+   while. The primary API has neither problem: it reads the same live database the website itself
+   writes to, with no replication step at all, and it's officially intended for exactly this kind
+   of small-area read (that's what every OSM editor's "download this bit of the map" button
+   calls). The tradeoff is it can't do Overpass's `map_to_area` trick (no "restrict to just this
+   course's own mapped area"), only a plain bbox — same shape as this file's existing bbox
+   fallback, so nothing is lost there — and it returns EVERY element in the box, not just
+   golf-tagged ones, hence the client-side filtering below. This is tried FIRST, before the
+   area/bbox Overpass logic in the handler, and only that existing logic runs if this comes back
+   empty or fails, so nothing about the Overpass path changes or gets worse. */
+async function fetchFromPrimaryAPI(south, north, west, east) {
+  const area = (north - south) * (east - west);
+  if (!(area > 0) || area > PRIMARY_API_MAX_AREA) return null;
+  try {
+    const url = `https://api.openstreetmap.org/api/0.6/map.json?bbox=${west},${south},${east},${north}`;
+    const upstream = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        // Deliberately no contact email here (unlike the Overpass/Nominatim proxies above,
+        // written before this app had a policy against sending it to a third party by default)
+        // — a generic client identifier is all the primary API's own usage policy actually asks
+        // for; this hits a different host than those two, so it gets a fresh, policy-correct UA
+        // rather than copying theirs.
+        "User-Agent": "Linksman-Golf-App/1.0 (personal golf scoring app)",
+      },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!upstream.ok) return null; // 400 (bbox too large), 509 (too much data), 5xx, etc. — fall back to Overpass
+    const data = await upstream.json();
+    const rawElements = data.elements || [];
+
+    // Resolve way geometry by hand: the primary API gives each way as a list of node IDs, not
+    // inline coordinates (unlike Overpass's `out geom`), but it DOES include every node those
+    // ways reference as its own element in the same flat array — so a node-id -> {lat, lon} map
+    // built from them is all that's needed to reconstruct the same `geometry` shape Overpass
+    // produces, which is the only reason parseOSMHoleElements (App.jsx) doesn't need to know or
+    // care which upstream actually answered this request.
+    const nodeCoords = new Map();
+    for (const el of rawElements) {
+      if (el.type === "node" && el.lat != null && el.lon != null) nodeCoords.set(el.id, { lat: el.lat, lon: el.lon });
+    }
+
+    const elements = [];
+    for (const el of rawElements) {
+      const golfValue = el.tags && el.tags.golf;
+      if (!golfValue || !GOLF_VALUES.has(golfValue)) continue;
+      if (el.type === "node") {
+        elements.push({ type: "node", id: el.id, lat: el.lat, lon: el.lon, tags: el.tags });
+      } else if (el.type === "way") {
+        const geometry = (el.nodes || []).map((id) => nodeCoords.get(id)).filter(Boolean);
+        if (!geometry.length) continue; // referenced nodes weren't in this bbox response — can't place it
+        elements.push({ type: "way", id: el.id, tags: el.tags, geometry });
+      }
+    }
+    return { elements };
+  } catch (e) {
+    return null; // network error, timeout, bad JSON — fall back to Overpass
+  }
 }
 
 async function runQuery(query) {
@@ -115,6 +205,19 @@ export default async function handler(req, res) {
   if (!hasArea && !hasBbox) {
     res.status(400).json({ error: "Need either osmType+osmId or south/north/west/east" });
     return;
+  }
+
+  // Try the live primary API first (see fetchFromPrimaryAPI above) — covers the common case
+  // (every real caller sends a bbox) with always-fresh data and no Overpass mirror involved at
+  // all. Only falls through to the Overpass logic below when this comes back empty/unusable, so
+  // a course with nothing mapped yet, or a bbox over the size cap, behaves exactly as before.
+  if (hasBbox) {
+    const [south, north, west, east] = bboxNums;
+    const primary = await fetchFromPrimaryAPI(south, north, west, east);
+    if (primary && primary.elements.length > 0) {
+      res.status(200).json(primary);
+      return;
+    }
   }
 
   if (hasArea) {
