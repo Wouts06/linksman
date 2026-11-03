@@ -9,10 +9,17 @@
 // tags.name (when mapped) and either lat/lon (nodes) or a center {lat, lon} (ways/relations,
 // via `out center;`).
 
+// Reordered 3 Nov (reliability round, same fix as api/osm-holes.js — see that file's longer
+// comment for the full reasoning) — overpass.kumi.systems dropped after community reports of it
+// serving stale/corrupted data, overpass.private.coffee (no rate limit) goes first, overpass-
+// api.de (documented <10,000 req/day cap, ongoing reliability issues since late 2025) stays as a
+// last resort. No primary-API fast path here unlike osm-holes.js: this endpoint searches a 40km
+// (up to 80km) radius around a point, which is a much bigger area than the OSM primary API's
+// bbox-size cap allows, and that API has no "search within a radius" query at all — Overpass's
+// `around:` is genuinely the only free tool for this specific query shape.
 const OVERPASS_ENDPOINTS = [
+  "https://overpass.private.coffee/api/interpreter",
   "https://overpass-api.de/api/interpreter",
-  "https://overpass.kumi.systems/api/interpreter", // most reliable public mirror as of 2026
-  "https://overpass.private.coffee/api/interpreter", // independent mirror
 ];
 
 export default async function handler(req, res) {
