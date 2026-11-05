@@ -1696,6 +1696,55 @@ const teeIcon = new L.DivIcon({ className: "", html: `<div style="width:14px;hei
 const greenIcon = new L.DivIcon({ className: "", html: `<div style="width:16px;height:16px;border-radius:50%;background:${C.turf};border:2px solid #FBF9F2;"></div>`, iconSize: [16, 16], iconAnchor: [8, 8] });
 const landingIcon = new L.DivIcon({ className: "", html: `<div style="width:16px;height:16px;border-radius:50%;background:${C.flag};border:2px solid #FBF9F2;box-shadow:0 1px 4px rgba(0,0,0,0.4);"></div>`, iconSize: [16, 16], iconAnchor: [8, 8] });
 
+/* on-map distance label (5 Nov) — a small pill showing a yardage number, placed directly on a
+   bunker/hazard's front or back edge instead of (or alongside) a text list below the map. The
+   inner div carries `counterRotateDeg` so the TEXT stays upright regardless of whether its
+   containing map is currently CSS-rotated for "line of attack" view (HoleViewModal is always
+   rotated when a bearing exists; DriveMapModal's rotation is an optional toggle) — without this,
+   a label could render sideways or upside-down depending on which direction the hole plays.
+   `iconAnchor: [0,0]` + the inner `translate(-50%,-50%)` centers the pill exactly on the given
+   lat/lon regardless of the pill's own (variable, text-length-dependent) rendered size. */
+function distanceLabelIcon(text, counterRotateDeg = 0) {
+  /* NOTE: this HTML string's own style attribute must stay single-quoted — `sans` (the app's
+     shared font-family constant) contains literal double quotes around "Segoe UI", which would
+     otherwise prematurely close a double-quoted attribute and silently truncate every property
+     after font-family (background/padding/border-radius/box-shadow all included) — caught via a
+     screenshot where the pill's background never actually rendered, just bare floating text. */
+  return new L.DivIcon({
+    className: "",
+    html: `<div style='transform:translate(-50%,-50%) rotate(${counterRotateDeg}deg);background:rgba(20,20,16,0.8);color:#FBF9F2;font:700 11px -apple-system,BlinkMacSystemFont,sans-serif;padding:2px 6px;border-radius:4px;white-space:nowrap;box-shadow:0 1px 3px rgba(0,0,0,0.45);'>${text}</div>`,
+    iconSize: [0, 0],
+    iconAnchor: [0, 0],
+  });
+}
+
+/* front-edge ("can I clear it from here") and back-edge (fully past it) carry distance for one
+   hazard polygon, measured from a single anchor point — shared by DriveMapModal's bunker/hazard
+   labels and HoleViewModal's pre-shot survey (5 Nov). Returns null when there's nothing to
+   measure from/to yet, so callers can simply .filter(Boolean) a mapped array of these. */
+function hazardPolygonDistances(vertices, anchorLat, anchorLon) {
+  if (anchorLat == null || !vertices?.length) return null;
+  const front = nearestVertexFrom(anchorLat, anchorLon, vertices);
+  const back = farthestVertexFrom(anchorLat, anchorLon, vertices);
+  if (!front || !back) return null;
+  return {
+    front, back,
+    frontYards: haversineYards(anchorLat, anchorLon, front.lat, front.lon),
+    backYards: haversineYards(anchorLat, anchorLon, back.lat, back.lon),
+  };
+}
+/* hole.bunkers is an array of plain vertex arrays; hole.hazards is an array of {kind, vertices} —
+   these two small wrappers normalize both into the same {..., kind} shape for rendering. */
+function bunkerCarryDistances(bunkers, anchorLat, anchorLon) {
+  return (bunkers || []).map((vertices) => hazardPolygonDistances(vertices, anchorLat, anchorLon)).filter(Boolean).sort((a, b) => a.frontYards - b.frontYards);
+}
+function waterHazardCarryDistances(hazards, anchorLat, anchorLon) {
+  return (hazards || [])
+    .map((hz) => { const d = hazardPolygonDistances(hz.vertices, anchorLat, anchorLon); return d ? { ...d, kind: hz.kind } : null; })
+    .filter(Boolean)
+    .sort((a, b) => a.frontYards - b.frontYards);
+}
+
 function MapClickCapture({ onPick, rotateDeg }) {
   /* useMapEvents registers its handler object once and does not appear to rebind it on every
      re-render (a stale-closure trap discovered while testing this, 16 Aug — clicks kept using
@@ -1766,27 +1815,19 @@ function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, d
      whole map by -bearing brings that direction to visually point "up", like a rangefinder. */
   const lineBearing = bearingDeg(pos?.lat ?? anchorLat, pos?.lng ?? anchorLon, aimGreen?.lat, aimGreen?.lon);
   const cssRotateDeg = rotateToLine && lineBearing != null ? -lineBearing : 0;
-  /* bunker carry distances (3 Nov) — "front edge" (nearest polygon vertex, where the sand
-     actually starts) and "far edge" (farthest vertex, i.e. what you'd need to clear to be fully
-     past it) measured from the SAME anchor point as shotYards above (the tee, or wherever the
-     previous shot landed) — this is "can I clear it from here", not "how far is it from where I
-     just landed", so it's deliberately not tied to `pos`. Reuses the exact nearestVertexFrom/
-     farthestVertexFrom helpers the green front/back toggle already uses, just pointed at a
-     bunker's polygon instead of the green's. */
-  const bunkerDistances = (hole.bunkers || [])
-    .map((vertices) => {
-      if (anchorLat == null || !vertices?.length) return null;
-      const front = nearestVertexFrom(anchorLat, anchorLon, vertices);
-      const back = farthestVertexFrom(anchorLat, anchorLon, vertices);
-      if (!front || !back) return null;
-      return {
-        vertices,
-        frontYards: haversineYards(anchorLat, anchorLon, front.lat, front.lon),
-        backYards: haversineYards(anchorLat, anchorLon, back.lat, back.lon),
-      };
-    })
-    .filter(Boolean)
-    .sort((a, b) => a.frontYards - b.frontYards);
+  /* on-map labels stay upright regardless of the current rotation toggle (5 Nov) — see
+     distanceLabelIcon's own comment. */
+  const labelCounterRotate = -cssRotateDeg;
+  const mapUnit = distanceUnit === "m" ? "m" : "y";
+  /* bunker/hazard carry distances (3 Nov; hazards added + moved on-map 5 Nov) — "front edge"
+     (nearest polygon vertex, where the sand/water actually starts) and "back edge" (farthest
+     vertex, i.e. what you'd need to clear to be fully past it) measured from the SAME anchor
+     point as shotYards above (the tee, or wherever the previous shot landed) — this is "can I
+     clear it from here", not "how far is it from where I just landed", so it's deliberately not
+     tied to `pos`. Shown directly on the map as small labels at each polygon's own front/back
+     vertex (see distanceLabelIcon below) rather than a separate text list, per explicit request. */
+  const bunkerDistances = bunkerCarryDistances(hole.bunkers, anchorLat, anchorLon);
+  const hazardDistances = waterHazardCarryDistances(hole.hazards, anchorLat, anchorLon);
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(20,20,16,0.55)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 14 }}>
@@ -1818,6 +1859,22 @@ function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, d
               {(hole.hazards || []).map((hz, i) => (
                 <Polygon key={`hazard-${i}`} positions={hz.vertices.map((p) => [p.lat, p.lon])} pathOptions={{ color: "#2f6f8f", weight: 1, fillColor: "#2f6f8f", fillOpacity: 0.4 }} />
               ))}
+              {/* front/back carry-distance labels (5 Nov), on the map itself at each polygon's own
+                 nearest/farthest vertex from the anchor — bunkers in the same brass accent as
+                 their shading, hazards in the matching steel-blue, so a label's color alone also
+                 says which kind of hazard it belongs to at a glance. */}
+              {bunkerDistances.map((b, i) => (
+                <React.Fragment key={`bunker-d-${i}`}>
+                  <Marker position={[b.front.lat, b.front.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(b.frontYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
+                  <Marker position={[b.back.lat, b.back.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(b.backYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
+                </React.Fragment>
+              ))}
+              {hazardDistances.map((h, i) => (
+                <React.Fragment key={`hazard-d-${i}`}>
+                  <Marker position={[h.front.lat, h.front.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(h.frontYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
+                  <Marker position={[h.back.lat, h.back.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(h.backYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
+                </React.Fragment>
+              ))}
               {anchorLat != null && <Marker position={[anchorLat, anchorLon]} icon={teeIcon} />}
               {aimGreen && <Marker position={[aimGreen.lat, aimGreen.lon]} icon={greenIcon} />}
               {pos && <Marker position={pos} icon={landingIcon} />}
@@ -1825,14 +1882,9 @@ function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, d
             </MapContainer>
           </div>
         </div>
-        {bunkerDistances.length > 0 && (
-          <div style={{ fontFamily: sans, fontSize: 11.5, color: C.turf, marginTop: 8, display: "flex", flexDirection: "column", gap: 2 }}>
-            <span style={{ fontWeight: 700, color: C.ink }}>⛳ Bunkers from here:</span>
-            {bunkerDistances.map((b, i) => (
-              <span key={i}>
-                Bunker {i + 1}: <b style={{ color: C.ink }}>{Math.round(displayDistance(b.frontYards, distanceUnit))}–{Math.round(displayDistance(b.backYards, distanceUnit))} {unitLabel}</b> to carry
-              </span>
-            ))}
+        {(bunkerDistances.length > 0 || hazardDistances.length > 0) && (
+          <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, marginTop: 6 }}>
+            ⛳ Numbers on the map show front/back carry distance to each bunker/hazard from {fromLat != null ? "your previous shot" : "the tee"}.
           </div>
         )}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
@@ -1969,6 +2021,125 @@ function GreenViewModal({ hole, fromLat, fromLon, distanceUnit, onClose }) {
             )}
           </div>
         </div>
+        {distanceToGreen != null && (
+          <div style={{ fontFamily: mono, fontSize: 14, color: C.ink, margin: "10px 0" }}>
+            Distance to green centre: <b>{Math.round(displayDistance(distanceToGreen, distanceUnit))} {unitLabel}</b>
+          </div>
+        )}
+        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          <button style={btnPrimary} onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* 5 Nov — a read-only survey of the WHOLE hole (tee through to the green, including every mapped
+   bunker/hazard along the way), requested specifically so bunkers that come into play off the tee
+   can be checked before a shot has been marked at all — unlike DriveMapModal (which only exists
+   once you're actively marking a shot) and GreenViewModal (deliberately tight-cropped to just the
+   green), this one fits the whole hole in frame. Read-only, same reasoning as GreenViewModal: no
+   click handling needed, so none of DriveMapModal's rotated-click-coordinate-correction math is
+   needed here either — only the rotation transform itself, reusing the same wrapper-div pattern.
+   Always rotated to the line of attack when a bearing exists, same as GreenViewModal, no toggle. */
+function HoleViewModal({ hole, fromLat, fromLon, distanceUnit, onClose }) {
+  const anchorLat = fromLat ?? hole.teeLat;
+  const anchorLon = fromLon ?? hole.teeLon;
+  const unitLabel = distanceUnit === "m" ? "m" : "yd";
+  const mapUnit = distanceUnit === "m" ? "m" : "y";
+
+  const hasGreenPolygon = hole.greenPolygon?.length > 2;
+  const greenCenterLat = hasGreenPolygon ? L.latLngBounds(hole.greenPolygon.map((p) => [p.lat, p.lon])).getCenter().lat : hole.greenLat;
+  const greenCenterLon = hasGreenPolygon ? L.latLngBounds(hole.greenPolygon.map((p) => [p.lat, p.lon])).getCenter().lng : hole.greenLon;
+
+  /* bounds cover everything that's actually mapped for this hole — tee, green (polygon or
+     point), and every bunker/hazard vertex — so a bunker well off to the side of the direct
+     tee-green line is still guaranteed to be in frame, not just assumed to sit along that line. */
+  const boundsPoints = [];
+  if (hole.teeLat != null) boundsPoints.push([hole.teeLat, hole.teeLon]);
+  if (hasGreenPolygon) hole.greenPolygon.forEach((p) => boundsPoints.push([p.lat, p.lon]));
+  else if (hole.greenLat != null) boundsPoints.push([hole.greenLat, hole.greenLon]);
+  (hole.bunkers || []).forEach((vertices) => vertices.forEach((p) => boundsPoints.push([p.lat, p.lon])));
+  (hole.hazards || []).forEach((hz) => hz.vertices.forEach((p) => boundsPoints.push([p.lat, p.lon])));
+  const bounds = boundsPoints.length > 1 ? L.latLngBounds(boundsPoints) : null;
+  const singlePoint = boundsPoints.length === 1 ? boundsPoints[0] : null;
+
+  const bearing = bearingDeg(anchorLat, anchorLon, greenCenterLat, greenCenterLon);
+  const cssRotateDeg = bearing != null ? -bearing : 0;
+  const labelCounterRotate = -cssRotateDeg;
+  const distanceToGreen = anchorLat != null && greenCenterLat != null ? haversineYards(anchorLat, anchorLon, greenCenterLat, greenCenterLon) : null;
+
+  const bunkerDistances = bunkerCarryDistances(hole.bunkers, anchorLat, anchorLon);
+  const hazardDistances = waterHazardCarryDistances(hole.hazards, anchorLat, anchorLon);
+
+  if (!bounds && !singlePoint) {
+    return (
+      <div style={{ position: "fixed", inset: 0, background: "rgba(20,20,16,0.55)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 14 }} onClick={onClose}>
+        <div style={{ background: C.paper, borderRadius: 10, padding: 16, maxWidth: 340 }} onClick={(e) => e.stopPropagation()}>
+          <div style={{ fontFamily: serif, fontSize: 16, color: C.fairway, marginBottom: 8 }}>Hole view unavailable</div>
+          <div style={{ fontFamily: sans, fontSize: 13, color: C.turf, marginBottom: 14 }}>This hole doesn't have any tee or green location data yet — add it via a course search/refresh, or mark it manually in Courses.</div>
+          <button style={btnPrimary} onClick={onClose}>Close</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(20,20,16,0.55)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 14 }}>
+      <div style={{ background: C.paper, borderRadius: 10, padding: 16, width: "100%", maxWidth: 480, maxHeight: "92vh", overflow: "auto" }}>
+        <div style={{ fontFamily: serif, fontSize: 16, color: C.fairway, marginBottom: 4 }}>Hole {hole.number} — hole view</div>
+        <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, marginBottom: 10 }}>
+          {bearing != null
+            ? "Rotated to the line of attack from where you are now — the direction straight up is the direction you're facing the green from."
+            : "No position to line up from yet — showing the hole north-up."}
+          {" "}Survey the whole hole, bunkers and all, before you've marked a shot.
+        </div>
+        <div style={{ height: 340, borderRadius: 6, overflow: "hidden", border: `1px solid ${C.line}`, position: "relative" }}>
+          {bearing != null && (
+            <div style={{ position: "absolute", top: 6, left: "50%", transform: "translateX(-50%)", zIndex: 500, fontSize: 18, color: C.white, textShadow: "0 1px 3px rgba(0,0,0,0.6)", pointerEvents: "none" }}>⬆</div>
+          )}
+          <div style={{ height: "100%", width: "100%", transform: cssRotateDeg ? `rotate(${cssRotateDeg}deg)` : undefined }}>
+            <MapContainer
+              {...(bounds ? { bounds, boundsOptions: { padding: [28, 28] } } : { center: singlePoint, zoom: 17 })}
+              maxZoom={22}
+              style={{ height: "100%", width: "100%" }}
+            >
+              <TileLayer
+                url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                attribution="Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community"
+                maxNativeZoom={19}
+                maxZoom={22}
+              />
+              {(hole.bunkers || []).map((vertices, i) => (
+                <Polygon key={`bunker-${i}`} positions={vertices.map((p) => [p.lat, p.lon])} pathOptions={{ color: C.brass, weight: 1, fillColor: C.brass, fillOpacity: 0.45 }} />
+              ))}
+              {(hole.hazards || []).map((hz, i) => (
+                <Polygon key={`hazard-${i}`} positions={hz.vertices.map((p) => [p.lat, p.lon])} pathOptions={{ color: "#2f6f8f", weight: 1, fillColor: "#2f6f8f", fillOpacity: 0.4 }} />
+              ))}
+              {bunkerDistances.map((b, i) => (
+                <React.Fragment key={`bunker-d-${i}`}>
+                  <Marker position={[b.front.lat, b.front.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(b.frontYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
+                  <Marker position={[b.back.lat, b.back.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(b.backYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
+                </React.Fragment>
+              ))}
+              {hazardDistances.map((h, i) => (
+                <React.Fragment key={`hazard-d-${i}`}>
+                  <Marker position={[h.front.lat, h.front.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(h.frontYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
+                  <Marker position={[h.back.lat, h.back.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(h.backYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
+                </React.Fragment>
+              ))}
+              {hasGreenPolygon && <Polygon positions={hole.greenPolygon.map((p) => [p.lat, p.lon])} pathOptions={{ color: C.white, weight: 2, fillColor: C.turf, fillOpacity: 0.35 }} />}
+              {hole.teeLat != null && <Marker position={[hole.teeLat, hole.teeLon]} icon={teeIcon} />}
+              {hole.greenLat != null && <Marker position={[hole.greenLat, hole.greenLon]} icon={greenIcon} />}
+              <RotationDragLock rotateDeg={cssRotateDeg} />
+            </MapContainer>
+          </div>
+        </div>
+        {(bunkerDistances.length > 0 || hazardDistances.length > 0) && (
+          <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, marginTop: 6 }}>
+            ⛳ Numbers on the map show front/back carry distance to each bunker/hazard from {fromLat != null ? "where you are now" : "the tee"}.
+          </div>
+        )}
         {distanceToGreen != null && (
           <div style={{ fontFamily: mono, fontSize: 14, color: C.ink, margin: "10px 0" }}>
             Distance to green centre: <b>{Math.round(displayDistance(distanceToGreen, distanceUnit))} {unitLabel}</b>
@@ -3832,6 +4003,7 @@ function BetterBallFocusedHole({
   alertTeamKey, alertWho, alertIsDrive, alertRoundIndex,
 }) {
   const [showGreenView, setShowGreenView] = useState(false);
+  const [showHoleView, setShowHoleView] = useState(false); // 5 Nov — whole-hole pre-shot survey
   const aimGreen = livePos ? greenAimPoint(livePos.lat, livePos.lon, hole, greenTarget) : null;
   const liveYards = aimGreen && livePos ? haversineYards(livePos.lat, livePos.lon, aimGreen.lat, aimGreen.lon) : null;
   const unitLabel = distanceUnit === "m" ? "m" : "y";
@@ -3855,11 +4027,29 @@ function BetterBallFocusedHole({
               <RangefinderNote playsAsYards={rangefinder.playsAsYards} distanceUnit={distanceUnit} />
             </div>
           )}
-          {hole.greenLat != null && (
-            <button style={{ ...btnGhost, fontSize: 13.5, padding: "0 10px", marginTop: 4, width: 150, height: 42, boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
-          )}
+          <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+            {/* 5 Nov — available any time this hole has at least a tee or green point, unlike
+               View green (which needs a green point specifically); the whole reason for this
+               button is checking bunkers in play before a shot has even been marked. */}
+            {(hole.teeLat != null || hole.greenLat != null) && (
+              <button style={{ ...btnGhost, fontSize: 13.5, padding: "0 10px", width: 150, height: 42, boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setShowHoleView(true)}>🏌 View hole</button>
+            )}
+            {hole.greenLat != null && (
+              <button style={{ ...btnGhost, fontSize: 13.5, padding: "0 10px", width: 150, height: 42, boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
+            )}
+          </div>
         </div>
       </div>
+
+      {showHoleView && (
+        <HoleViewModal
+          hole={hole}
+          fromLat={livePos?.lat ?? hole.teeLat}
+          fromLon={livePos?.lon ?? hole.teeLon}
+          distanceUnit={distanceUnit}
+          onClose={() => setShowHoleView(false)}
+        />
+      )}
 
       {showGreenView && (
         <GreenViewModal
@@ -3904,6 +4094,7 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
   const [puttPickerForPid, setPuttPickerForPid] = useState(null); // 15 Aug — same tap-only picker as Better Ball, applied here too
   const [penaltyTarget, setPenaltyTarget] = useState(null); // null | { pid, kind: "drive" } | { pid, kind: "extra", idx }
   const [showGreenView, setShowGreenView] = useState(false);
+  const [showHoleView, setShowHoleView] = useState(false); // 5 Nov — whole-hole pre-shot survey
   /* which shot block is expanded per player (25 Sep, per explicit request: "minimize the
      previous shot once Next Shot is clicked") — keyed by pid, storing the tapped-open block's
      key ("drive" or an extraShots index) together with the shot count at the time it was chosen.
@@ -3982,7 +4173,7 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
           the user-supplied circular bag-badge SVG (public/golf-bag.svg, served at the site
           root same as favicon.svg). View green keeps its old size/position, just now sharing
           this row instead of stacking under the suggestion. */}
-      {(suggestion || hole.greenLat != null) && (
+      {(suggestion || hole.teeLat != null || hole.greenLat != null) && (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, gap: 8 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
             {suggestion && (
@@ -3992,10 +4183,28 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
               </>
             )}
           </div>
-          {hole.greenLat != null && (
-            <button style={{ ...btnGhost, fontSize: 13.5, padding: "0 10px", width: 150, height: 42, boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
-          )}
+          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+            {/* 5 Nov — available any time this hole has at least a tee or green point, unlike
+               View green (which needs a green point specifically); the whole reason for this
+               button is checking bunkers in play before a shot has even been marked. */}
+            {(hole.teeLat != null || hole.greenLat != null) && (
+              <button style={{ ...btnGhost, fontSize: 13.5, padding: "0 10px", width: 150, height: 42, boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setShowHoleView(true)}>🏌 View hole</button>
+            )}
+            {hole.greenLat != null && (
+              <button style={{ ...btnGhost, fontSize: 13.5, padding: "0 10px", width: 150, height: 42, boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "center" }} onClick={() => setShowGreenView(true)}>🎯 View green</button>
+            )}
+          </div>
         </div>
+      )}
+
+      {showHoleView && (
+        <HoleViewModal
+          hole={hole}
+          fromLat={livePos?.lat ?? hole.teeLat}
+          fromLon={livePos?.lon ?? hole.teeLon}
+          distanceUnit={distanceUnit}
+          onClose={() => setShowHoleView(false)}
+        />
       )}
 
       {showGreenView && (
