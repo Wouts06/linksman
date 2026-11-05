@@ -1105,6 +1105,13 @@ function parseOSMHoleElements(data) {
   const bunkersByHole = collectPolygons("bunker");
   const waterByHole = collectPolygons("water_hazard");
   const lateralByHole = collectPolygons("lateral_water_hazard");
+  // golf=fairway (5 Nov, vector-diagram round) — same array-per-hole shape as bunkers: real
+  // courses occasionally map a dogleg's two bends as separate ways, so this isn't assumed to be
+  // a single polygon. Reuses the same "both"-anchor matching as bunkers/hazards, for the same
+  // reason (a fairway obviously isn't anchored to just the green). Coverage is sparser than
+  // bunkers/hazards in practice — most mappers who bother with bunkers/hazards still skip
+  // fairways — so a hole missing this is the common case, not a bug.
+  const fairwaysByHole = collectPolygons("fairway");
   for (const h of holes) {
     h.bunkers = bunkersByHole.get(h.number) || null;
     const hazards = [
@@ -1112,6 +1119,7 @@ function parseOSMHoleElements(data) {
       ...(lateralByHole.get(h.number) || []).map((vertices) => ({ kind: "lateral_water_hazard", vertices })),
     ];
     h.hazards = hazards.length ? hazards : null;
+    h.fairways = fairwaysByHole.get(h.number) || null;
   }
 
   // golf=tee elements: a node has lat/lon directly; an area (way/multipolygon) is returned as
@@ -2034,6 +2042,122 @@ function GreenViewModal({ hole, fromLat, fromLon, distanceUnit, onClose }) {
   );
 }
 
+/* 5 Nov — local flat-earth projection for HoleDiagramVector below: converts a lat/lon into
+   metres east/north of an origin point, then rotates so the given compass bearing (tee->green)
+   points straight "up" in screen terms (y-down, like SVG/canvas) — independent of which way the
+   hole actually plays on a real map. A single hole never spans more than a few hundred metres, so
+   the flat-earth approximation (no great-circle math) is well within the precision this needs.
+   Rotating by +bearing (standard CCW math convention) aligns the tee->green compass direction
+   with (0,1)-"up"; this is the mirror image of cssRotateDeg (= -bearing) used elsewhere in this
+   file for CSS `rotate()`, which spins clockwise for positive values — same physical rotation,
+   opposite sign convention, because CSS and standard math rotate opposite ways. */
+function projectLocal(lat, lon, originLat, originLon, bearingDegVal) {
+  const mPerDegLat = 110540;
+  const mPerDegLon = 111320 * Math.cos((originLat * Math.PI) / 180);
+  const yM = (lat - originLat) * mPerDegLat; // metres north of origin
+  const xM = (lon - originLon) * mPerDegLon; // metres east of origin
+  const rad = ((bearingDegVal || 0) * Math.PI) / 180;
+  const rotX = xM * Math.cos(rad) - yM * Math.sin(rad);
+  const rotY = xM * Math.sin(rad) + yM * Math.cos(rad);
+  return { x: rotX, y: -rotY }; // "up" (toward the green) is negative y in screen/SVG terms
+}
+
+/* 5 Nov — vector/diagram alternative to the satellite HoleViewModal, toggled from within it.
+   Draws fairway/green/bunker/hazard shapes as flat SVG polygons instead of loading map tiles —
+   a yardage-book-style diagram rather than a photo. Fairway coverage in OpenStreetMap is sparser
+   than bunkers/hazards/green (most mappers who tag hazards still skip fairways), so a hole with
+   no fairway polygon still renders fine here, just without that one shape — same "null is the
+   common case, not an error" treatment bunkers/hazards already get. Needs a tee point to anchor
+   the projection; a hole with only a green mapped (no tee) can't be diagrammed this way, which is
+   a real but rare edge case (same one HoleViewModal's own north-up fallback already handles for
+   rotation). No Leaflet/tiles at all, so unlike the satellite view this renders identically with
+   no network access — including in this project's own sandboxed test runs. */
+function HoleDiagramVector({ hole, bearing, distanceUnit, bunkerDistances, hazardDistances }) {
+  const mapUnit = distanceUnit === "m" ? "m" : "y";
+  if (hole.teeLat == null) {
+    return (
+      <div style={{ height: "100%", width: "100%", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, textAlign: "center", fontFamily: sans, fontSize: 12.5, color: C.turf, background: "#D7D2BE" }}>
+        No tee point mapped for this hole yet — the diagram needs one to orient itself.
+      </div>
+    );
+  }
+  const originLat = hole.teeLat, originLon = hole.teeLon;
+  const proj = (lat, lon) => projectLocal(lat, lon, originLat, originLon, bearing || 0);
+  const hasGreenPolygon = hole.greenPolygon?.length > 2;
+
+  const teeP = proj(hole.teeLat, hole.teeLon);
+  const greenPolyPts = hasGreenPolygon ? hole.greenPolygon.map((p) => proj(p.lat, p.lon)) : null;
+  // drawn whenever a green point exists, same as the satellite view's own green Marker — even
+  // with a polygon shaded in, this is the actual reference point distances are measured to
+  // (which can be the polygon's back edge, not its centroid), so it's worth marking separately.
+  const greenPointP = hole.greenLat != null ? proj(hole.greenLat, hole.greenLon) : null;
+  const fairwayPolys = (hole.fairways || []).map((vertices) => vertices.map((p) => proj(p.lat, p.lon)));
+  const bunkerPolys = (hole.bunkers || []).map((vertices) => vertices.map((p) => proj(p.lat, p.lon)));
+  const hazardPolys = (hole.hazards || []).map((hz) => hz.vertices.map((p) => proj(p.lat, p.lon)));
+
+  const allPts = [teeP, ...(greenPolyPts || (greenPointP ? [greenPointP] : [])), ...fairwayPolys.flat(), ...bunkerPolys.flat(), ...hazardPolys.flat()];
+  const xs = allPts.map((p) => p.x), ys = allPts.map((p) => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const spanX = Math.max(maxX - minX, 1), spanY = Math.max(maxY - minY, 1);
+  const pad = Math.max(10, Math.max(spanX, spanY) * 0.12);
+  const vbX = minX - pad, vbY = minY - pad, vbW = spanX + pad * 2, vbH = spanY + pad * 2;
+  const toSvgPoints = (pts) => pts.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+
+  /* every on-diagram size is scaled from the viewBox's own span (metres), not fixed pixels — a
+     fixed stroke/font would look like a hairline on a 550m par 5 and comically thick on an 80m
+     tight-cropped green; ~300m is treated as the "normal" reference hole length. */
+  const unitScale = Math.max(spanX, spanY) / 300;
+  const strokeW = Math.max(0.6, 1.1 * unitScale);
+  const fontSize = Math.max(7.5, 12 * unitScale);
+
+  function DistLabel({ x, y, text }) {
+    const w = text.length * fontSize * 0.64 + fontSize;
+    const h = fontSize * 1.7;
+    return (
+      <g>
+        <rect x={x - w / 2} y={y - h / 2} width={w} height={h} rx={h * 0.25} fill="rgba(20,20,16,0.82)" />
+        <text x={x} y={y} fontSize={fontSize} fill="#FBF9F2" fontWeight={700} fontFamily={sans} textAnchor="middle" dominantBaseline="central">{text}</text>
+      </g>
+    );
+  }
+
+  return (
+    <svg viewBox={`${vbX} ${vbY} ${vbW} ${vbH}`} width="100%" height="100%" preserveAspectRatio="xMidYMid meet" style={{ display: "block", background: "#D7D2BE" }}>
+      {fairwayPolys.map((pts, i) => (
+        <polygon key={`fw-${i}`} points={toSvgPoints(pts)} fill="#9DBE7E" stroke="#7FA05E" strokeWidth={strokeW} />
+      ))}
+      {bunkerPolys.map((pts, i) => (
+        <polygon key={`bk-${i}`} points={toSvgPoints(pts)} fill={C.brass} stroke={C.brass} strokeWidth={strokeW} fillOpacity={0.9} />
+      ))}
+      {hazardPolys.map((pts, i) => (
+        <polygon key={`hz-${i}`} points={toSvgPoints(pts)} fill="#2f6f8f" stroke="#2f6f8f" strokeWidth={strokeW} fillOpacity={0.85} />
+      ))}
+      {greenPolyPts && <polygon points={toSvgPoints(greenPolyPts)} fill={C.turf} stroke="#FBF9F2" strokeWidth={strokeW * 1.6} />}
+      {bunkerDistances.map((b, i) => {
+        const fp = proj(b.front.lat, b.front.lon), bp = proj(b.back.lat, b.back.lon);
+        return (
+          <React.Fragment key={`bd-${i}`}>
+            <DistLabel x={fp.x} y={fp.y} text={`${Math.round(displayDistance(b.frontYards, distanceUnit))}${mapUnit}`} />
+            <DistLabel x={bp.x} y={bp.y} text={`${Math.round(displayDistance(b.backYards, distanceUnit))}${mapUnit}`} />
+          </React.Fragment>
+        );
+      })}
+      {hazardDistances.map((h, i) => {
+        const fp = proj(h.front.lat, h.front.lon), bp = proj(h.back.lat, h.back.lon);
+        return (
+          <React.Fragment key={`hd-${i}`}>
+            <DistLabel x={fp.x} y={fp.y} text={`${Math.round(displayDistance(h.frontYards, distanceUnit))}${mapUnit}`} />
+            <DistLabel x={bp.x} y={bp.y} text={`${Math.round(displayDistance(h.backYards, distanceUnit))}${mapUnit}`} />
+          </React.Fragment>
+        );
+      })}
+      <circle cx={teeP.x} cy={teeP.y} r={fontSize * 0.5} fill="#FBF9F2" stroke={C.fairway} strokeWidth={strokeW * 1.6} />
+      {greenPointP && <circle cx={greenPointP.x} cy={greenPointP.y} r={fontSize * 0.55} fill={C.turf} stroke="#FBF9F2" strokeWidth={strokeW} />}
+    </svg>
+  );
+}
+
 /* 5 Nov — a read-only survey of the WHOLE hole (tee through to the green, including every mapped
    bunker/hazard along the way), requested specifically so bunkers that come into play off the tee
    can be checked before a shot has been marked at all — unlike DriveMapModal (which only exists
@@ -2043,6 +2167,7 @@ function GreenViewModal({ hole, fromLat, fromLon, distanceUnit, onClose }) {
    needed here either — only the rotation transform itself, reusing the same wrapper-div pattern.
    Always rotated to the line of attack when a bearing exists, same as GreenViewModal, no toggle. */
 function HoleViewModal({ hole, fromLat, fromLon, distanceUnit, onClose }) {
+  const [viewMode, setViewMode] = useState("satellite"); // "satellite" | "diagram" (5 Nov)
   const anchorLat = fromLat ?? hole.teeLat;
   const anchorLon = fromLon ?? hole.teeLon;
   const unitLabel = distanceUnit === "m" ? "m" : "yd";
@@ -2064,7 +2189,16 @@ function HoleViewModal({ hole, fromLat, fromLon, distanceUnit, onClose }) {
   const bounds = boundsPoints.length > 1 ? L.latLngBounds(boundsPoints) : null;
   const singlePoint = boundsPoints.length === 1 ? boundsPoints[0] : null;
 
-  const bearing = bearingDeg(anchorLat, anchorLon, greenCenterLat, greenCenterLon);
+  /* 5 Nov — deliberately NOT based on the live GPS anchor any more: this used to rotate as the
+     golfer moved around (bearingDeg(anchorLat, anchorLon, ...)), which the user reported as
+     unwanted "auto rotate." This view now always orients tee-to-green using the hole's own fixed
+     points, so it's a static diagram — tee at the bottom, green at the top — that never moves
+     while the modal is open, regardless of where the golfer is standing. Falls back to north-up
+     only when one of tee/green is genuinely missing (the View hole button itself only needs one
+     of the two, so that's a real, if rare, case). */
+  const bearing = (hole.teeLat != null && greenCenterLat != null)
+    ? bearingDeg(hole.teeLat, hole.teeLon, greenCenterLat, greenCenterLon)
+    : null;
   const cssRotateDeg = bearing != null ? -bearing : 0;
   const labelCounterRotate = -cssRotateDeg;
   const distanceToGreen = anchorLat != null && greenCenterLat != null ? haversineYards(anchorLat, anchorLon, greenCenterLat, greenCenterLon) : null;
@@ -2086,66 +2220,99 @@ function HoleViewModal({ hole, fromLat, fromLon, distanceUnit, onClose }) {
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(20,20,16,0.55)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 14 }}>
-      <div style={{ background: C.paper, borderRadius: 10, padding: 16, width: "100%", maxWidth: 480, maxHeight: "92vh", overflow: "auto" }}>
-        <div style={{ fontFamily: serif, fontSize: 16, color: C.fairway, marginBottom: 4 }}>Hole {hole.number} — hole view</div>
-        <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, marginBottom: 10 }}>
+      {/* 5 Nov — flex column filling most of the viewport height (was a fixed-height card with a
+         340px map box): the user asked for the map itself to be "as big as possible but still
+         fit the screen," in portrait, tee fixed at the bottom and green at the top. Leaflet's own
+         fitBounds already picks the highest zoom that fits the given bounds in whatever pixel box
+         it's given, so handing it a near-full-height box (flex: 1 below, instead of a fixed 340px)
+         is what actually buys the bigger/more-zoomed-in view — no bounds-fitting math to change. */}
+      <div style={{ background: C.paper, borderRadius: 10, padding: 16, width: "100%", maxWidth: 480, height: "92vh", maxHeight: "92vh", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 4, flexShrink: 0 }}>
+          <div style={{ fontFamily: serif, fontSize: 16, color: C.fairway }}>Hole {hole.number} — hole view</div>
+          {/* 5 Nov — Satellite/Diagram toggle: the vector diagram draws fairway/green/bunker/
+             hazard shapes as flat shapes instead of loading map tiles, like a yardage-book page
+             rather than a photo. Same segmented-control look as GreenTargetToggle elsewhere. */}
+          <div style={{ display: "inline-flex", border: `1px solid ${C.line}`, borderRadius: 5, overflow: "hidden", flexShrink: 0 }}>
+            {["satellite", "diagram"].map((opt) => (
+              <button
+                key={opt}
+                onClick={() => setViewMode(opt)}
+                style={{
+                  fontSize: 12, fontFamily: sans, fontWeight: 700, cursor: "pointer", border: "none",
+                  textTransform: "capitalize", padding: "6px 10px",
+                  background: viewMode === opt ? C.fairway : C.white,
+                  color: viewMode === opt ? C.white : C.turf,
+                }}
+              >
+                {opt}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div style={{ fontFamily: sans, fontSize: 12, color: C.turf, marginBottom: 10, flexShrink: 0 }}>
           {bearing != null
-            ? "Rotated to the line of attack from where you are now — the direction straight up is the direction you're facing the green from."
-            : "No position to line up from yet — showing the hole north-up."}
+            ? "Fixed orientation, not your live position — tee at the bottom, green at the top. Doesn't rotate as you move."
+            : "No tee-to-green line to orient from yet — showing the hole north-up."}
           {" "}Survey the whole hole, bunkers and all, before you've marked a shot.
         </div>
-        <div style={{ height: 340, borderRadius: 6, overflow: "hidden", border: `1px solid ${C.line}`, position: "relative" }}>
+        <div style={{ flex: 1, minHeight: 0, borderRadius: 6, overflow: "hidden", border: `1px solid ${C.line}`, position: "relative" }}>
           {bearing != null && (
             <div style={{ position: "absolute", top: 6, left: "50%", transform: "translateX(-50%)", zIndex: 500, fontSize: 18, color: C.white, textShadow: "0 1px 3px rgba(0,0,0,0.6)", pointerEvents: "none" }}>⬆</div>
           )}
-          <div style={{ height: "100%", width: "100%", transform: cssRotateDeg ? `rotate(${cssRotateDeg}deg)` : undefined }}>
-            <MapContainer
-              {...(bounds ? { bounds, boundsOptions: { padding: [28, 28] } } : { center: singlePoint, zoom: 17 })}
-              maxZoom={22}
-              style={{ height: "100%", width: "100%" }}
-            >
-              <TileLayer
-                url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-                attribution="Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community"
-                maxNativeZoom={19}
+          {viewMode === "diagram" ? (
+            <HoleDiagramVector hole={hole} bearing={bearing} distanceUnit={distanceUnit} bunkerDistances={bunkerDistances} hazardDistances={hazardDistances} />
+          ) : (
+            <div style={{ height: "100%", width: "100%", transform: cssRotateDeg ? `rotate(${cssRotateDeg}deg)` : undefined }}>
+              <MapContainer
+                {...(bounds ? { bounds, boundsOptions: { padding: [24, 24] } } : { center: singlePoint, zoom: 17 })}
                 maxZoom={22}
-              />
-              {(hole.bunkers || []).map((vertices, i) => (
-                <Polygon key={`bunker-${i}`} positions={vertices.map((p) => [p.lat, p.lon])} pathOptions={{ color: C.brass, weight: 1, fillColor: C.brass, fillOpacity: 0.45 }} />
-              ))}
-              {(hole.hazards || []).map((hz, i) => (
-                <Polygon key={`hazard-${i}`} positions={hz.vertices.map((p) => [p.lat, p.lon])} pathOptions={{ color: "#2f6f8f", weight: 1, fillColor: "#2f6f8f", fillOpacity: 0.4 }} />
-              ))}
-              {bunkerDistances.map((b, i) => (
-                <React.Fragment key={`bunker-d-${i}`}>
-                  <Marker position={[b.front.lat, b.front.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(b.frontYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
-                  <Marker position={[b.back.lat, b.back.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(b.backYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
-                </React.Fragment>
-              ))}
-              {hazardDistances.map((h, i) => (
-                <React.Fragment key={`hazard-d-${i}`}>
-                  <Marker position={[h.front.lat, h.front.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(h.frontYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
-                  <Marker position={[h.back.lat, h.back.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(h.backYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
-                </React.Fragment>
-              ))}
-              {hasGreenPolygon && <Polygon positions={hole.greenPolygon.map((p) => [p.lat, p.lon])} pathOptions={{ color: C.white, weight: 2, fillColor: C.turf, fillOpacity: 0.35 }} />}
-              {hole.teeLat != null && <Marker position={[hole.teeLat, hole.teeLon]} icon={teeIcon} />}
-              {hole.greenLat != null && <Marker position={[hole.greenLat, hole.greenLon]} icon={greenIcon} />}
-              <RotationDragLock rotateDeg={cssRotateDeg} />
-            </MapContainer>
-          </div>
+                zoomSnap={0.1}
+                zoomDelta={0.1}
+                style={{ height: "100%", width: "100%" }}
+              >
+                <TileLayer
+                  url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                  attribution="Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community"
+                  maxNativeZoom={19}
+                  maxZoom={22}
+                />
+                {(hole.bunkers || []).map((vertices, i) => (
+                  <Polygon key={`bunker-${i}`} positions={vertices.map((p) => [p.lat, p.lon])} pathOptions={{ color: C.brass, weight: 1, fillColor: C.brass, fillOpacity: 0.45 }} />
+                ))}
+                {(hole.hazards || []).map((hz, i) => (
+                  <Polygon key={`hazard-${i}`} positions={hz.vertices.map((p) => [p.lat, p.lon])} pathOptions={{ color: "#2f6f8f", weight: 1, fillColor: "#2f6f8f", fillOpacity: 0.4 }} />
+                ))}
+                {bunkerDistances.map((b, i) => (
+                  <React.Fragment key={`bunker-d-${i}`}>
+                    <Marker position={[b.front.lat, b.front.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(b.frontYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
+                    <Marker position={[b.back.lat, b.back.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(b.backYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
+                  </React.Fragment>
+                ))}
+                {hazardDistances.map((h, i) => (
+                  <React.Fragment key={`hazard-d-${i}`}>
+                    <Marker position={[h.front.lat, h.front.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(h.frontYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
+                    <Marker position={[h.back.lat, h.back.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(h.backYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
+                  </React.Fragment>
+                ))}
+                {hasGreenPolygon && <Polygon positions={hole.greenPolygon.map((p) => [p.lat, p.lon])} pathOptions={{ color: C.white, weight: 2, fillColor: C.turf, fillOpacity: 0.35 }} />}
+                {hole.teeLat != null && <Marker position={[hole.teeLat, hole.teeLon]} icon={teeIcon} />}
+                {hole.greenLat != null && <Marker position={[hole.greenLat, hole.greenLon]} icon={greenIcon} />}
+                <RotationDragLock rotateDeg={cssRotateDeg} />
+              </MapContainer>
+            </div>
+          )}
         </div>
         {(bunkerDistances.length > 0 || hazardDistances.length > 0) && (
-          <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, marginTop: 6 }}>
+          <div style={{ fontFamily: sans, fontSize: 11, color: C.turf, marginTop: 6, flexShrink: 0 }}>
             ⛳ Numbers on the map show front/back carry distance to each bunker/hazard from {fromLat != null ? "where you are now" : "the tee"}.
           </div>
         )}
         {distanceToGreen != null && (
-          <div style={{ fontFamily: mono, fontSize: 14, color: C.ink, margin: "10px 0" }}>
+          <div style={{ fontFamily: mono, fontSize: 14, color: C.ink, margin: "10px 0", flexShrink: 0 }}>
             Distance to green centre: <b>{Math.round(displayDistance(distanceToGreen, distanceUnit))} {unitLabel}</b>
           </div>
         )}
-        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+        <div style={{ display: "flex", justifyContent: "flex-end", flexShrink: 0 }}>
           <button style={btnPrimary} onClick={onClose}>Close</button>
         </div>
       </div>
@@ -2587,7 +2754,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
   const [manualLat, setManualLat] = useState("");
   const [manualLon, setManualLon] = useState("");
   const [holes, setHoles] = useState(
-    Array.from({ length: 18 }, (_, i) => ({ number: i + 1, par: 4, yardage: "", strokeIndex: "", teeLat: null, teeLon: null, greenLat: null, greenLon: null, greenPolygon: null, bunkers: null, hazards: null }))
+    Array.from({ length: 18 }, (_, i) => ({ number: i + 1, par: 4, yardage: "", strokeIndex: "", teeLat: null, teeLon: null, greenLat: null, greenLon: null, greenPolygon: null, bunkers: null, hazards: null, fairways: null }))
   );
   const [osmQuery, setOsmQuery] = useState("");
   const [osmResults, setOsmResults] = useState([]);
@@ -2767,6 +2934,10 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
           // nothing mapped for this hole, which is the common case.
           bunkers: found?.bunkers ?? null,
           hazards: found?.hazards ?? null,
+          // fairway polygon(s) (5 Nov, vector-diagram round) — same carry-through treatment,
+          // array of vertex arrays since a dogleg can be mapped as more than one way; null when
+          // OSM has nothing mapped (the common case — sparser coverage than bunkers/hazards).
+          fairways: found?.fairways ?? null,
         };
       });
       const gpsCount = osmHoles.filter((h) => h.greenLat != null).length;
@@ -2899,7 +3070,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
 
   function resetForm() {
     setName(""); setNumHoles(18); setRating(""); setSlope(""); setManualLat(""); setManualLon("");
-    setHoles(Array.from({ length: 18 }, (_, i) => ({ number: i + 1, par: 4, yardage: "", strokeIndex: "", teeLat: null, teeLon: null, greenLat: null, greenLon: null, greenPolygon: null, bunkers: null, hazards: null })));
+    setHoles(Array.from({ length: 18 }, (_, i) => ({ number: i + 1, par: 4, yardage: "", strokeIndex: "", teeLat: null, teeLon: null, greenLat: null, greenLon: null, greenPolygon: null, bunkers: null, hazards: null, fairways: null })));
     setOsmQuery(""); setOsmResults([]); setOsmStatus(""); setOsmFailed(false); setLastOSMCandidate(null); setOsmFromCache(false);
     setTeeColor("White"); setExtraTees([]); setPrimaryFromOSM(false);
     setRatingSource(null);
@@ -2907,7 +3078,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
   }
   function updateHoleCount(n) {
     setNumHoles(n);
-    setHoles(Array.from({ length: n }, (_, i) => holes[i] || { number: i + 1, par: 4, yardage: "", strokeIndex: "", teeLat: null, teeLon: null, greenLat: null, greenLon: null, greenPolygon: null, bunkers: null, hazards: null }));
+    setHoles(Array.from({ length: n }, (_, i) => holes[i] || { number: i + 1, par: 4, yardage: "", strokeIndex: "", teeLat: null, teeLon: null, greenLat: null, greenLon: null, greenPolygon: null, bunkers: null, hazards: null, fairways: null }));
   }
   function updateHole(i, field, val) {
     const next = [...holes];
@@ -2992,7 +3163,7 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
         number: h.number, par: Number(h.par) || 4, yardage: h.yardage ? Number(h.yardage) : null, strokeIndex: h.strokeIndex ? Number(h.strokeIndex) : null,
         teeLat: h.teeLat ?? null, teeLon: h.teeLon ?? null, greenLat: h.greenLat ?? null, greenLon: h.greenLon ?? null,
         greenPolygon: h.greenPolygon ?? null,
-        bunkers: h.bunkers ?? null, hazards: h.hazards ?? null,
+        bunkers: h.bunkers ?? null, hazards: h.hazards ?? null, fairways: h.fairways ?? null,
       })),
       tees,
     };

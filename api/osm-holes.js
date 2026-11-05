@@ -80,6 +80,7 @@ const GOLF_FILTERS = [
   { type: "node", value: "bunker" }, // discouraged by the wiki but seen in practice; harmless to include
   { type: "way", value: "water_hazard" },
   { type: "way", value: "lateral_water_hazard" },
+  { type: "way", value: "fairway" }, // 5 Nov — vector-diagram hole view; fairways are ways only in practice
 ];
 
 function buildFilters(scope) {
