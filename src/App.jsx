@@ -4013,7 +4013,7 @@ function BetterBallFocusedHole({
   const rangefinder = useRangefinder(rangefinderEnabled, `${course?.id || "c"}-${hole.number}`, livePos?.lat, livePos?.lon, aimGreen?.lat, aimGreen?.lon, liveYards);
   return (
     <div style={{ padding: 12, background: C.white }}>
-      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 10, gap: 8 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 10, gap: 8, flexWrap: "wrap", rowGap: 8 }}>
         <HoleDataCluster hole={hole} distanceUnit={distanceUnit} unitLabel={unitLabel} />
         <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", fontFamily: sans, fontSize: 12, color: C.turf, flexShrink: 0 }}>
           {hole.greenPolygon?.length > 0 && (
@@ -4027,7 +4027,7 @@ function BetterBallFocusedHole({
               <RangefinderNote playsAsYards={rangefinder.playsAsYards} distanceUnit={distanceUnit} />
             </div>
           )}
-          <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+          <div style={{ display: "flex", gap: 6, marginTop: 4, flexWrap: "wrap", justifyContent: "flex-end", rowGap: 6 }}>
             {/* 5 Nov — available any time this hole has at least a tee or green point, unlike
                View green (which needs a green point specifically); the whole reason for this
                button is checking bunkers in play before a shot has even been marked. */}
@@ -4174,7 +4174,7 @@ function StrokeHoleCard({ hole, isLast, players, selected, scores, distanceUnit,
           root same as favicon.svg). View green keeps its old size/position, just now sharing
           this row instead of stacking under the suggestion. */}
       {(suggestion || hole.teeLat != null || hole.greenLat != null) && (
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, gap: 8, flexWrap: "wrap", rowGap: 8 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
             {suggestion && (
               <>
