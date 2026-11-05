@@ -657,6 +657,70 @@ async function searchOSMNearby(lat, lon, radiusMeters) {
     .slice(0, 20);
 }
 
+/* Offline-imported golf course data (3 Nov, reliability round) — see scripts/golfdb/README.md
+   for how this gets populated. Public Overpass mirrors turned out to be too unreliable to depend
+   on at request time (frequent timeouts/502s even across 3 mirrors), so courses are now imported
+   ahead of time from a Geofabrik OSM extract into this app's own database (osm_courses table),
+   served by linksman-api/nearby-courses.php and course-geometry.php. These are tried FIRST
+   wherever a course might be in the imported region (South Africa, to start) since it's our own
+   server with no rate limits and no mirror to fail — the live OSM path below (searchOSMNearby/
+   fetchOSMHoles) remains the fallback for anything outside the imported dataset, or for courses
+   not yet covered by it. A "not found" result from either of these (404, or an empty list) is a
+   normal, expected outcome, not a failure — it just means "try the live OSM path instead." */
+async function fetchNearbyCoursesFromDB(lat, lon, radiusMeters) {
+  const url = `${API_BASE}/nearby-courses.php?lat=${lat}&lon=${lon}&radius=${radiusMeters}`;
+  const res = await fetchWithTimeout(url, { headers: { Accept: "application/json" } }, 10000);
+  if (!res.ok) throw new Error("Nearby course search failed");
+  const data = await res.json();
+  return (data.courses || []).map((c) => {
+    // same generous fixed pad searchOSMNearby uses for its center-point-only Overpass results —
+    // harmless here (course-geometry.php looks this candidate up by dbId, not by boundingbox),
+    // kept only so a candidate from this path still looks exactly like one from the live path to
+    // any other code that might inspect .boundingbox.
+    const latPad = 0.02;
+    const lonPad = 0.02 / Math.max(Math.cos((c.lat * Math.PI) / 180), 0.15);
+    return {
+      dbId: c.id,
+      osmType: null,
+      osmId: null,
+      name: c.name,
+      displayName: c.name,
+      lat: c.lat,
+      lon: c.lon,
+      distanceMi: haversine(lat, lon, c.lat, c.lon),
+      boundingbox: [c.lat - latPad, c.lat + latPad, c.lon - lonPad, c.lon + lonPad],
+    };
+  });
+}
+
+/* Returns { holes, teeSets } exactly like fetchOSMHoles below (so callers can treat the two
+   interchangeably), or null when this course isn't in the imported dataset yet — never throws
+   for that case, only for a genuine network/server failure. teeSets is always [] here: the
+   offline extractor doesn't do colour-tagged tee-box detection (scripts/golfdb/extract.mjs,
+   documented v1 scope cut) — applyOSMHoles already treats an empty teeSets list as the normal
+   "no colour-coded tee boxes found" case, same as most live-OSM courses show today anyway.
+   Looks up by dbId when the candidate came from fetchNearbyCoursesFromDB (exact row); otherwise
+   (a name-search/live-nearby result, which only has a location) looks up by lat/lon — a ~1.5km
+   match radius server-side is tight enough to only match the same course, not a different one
+   nearby (see course-geometry.php). */
+async function fetchCourseGeometryFromDB(candidate) {
+  const params = new URLSearchParams();
+  if (candidate?.dbId != null) {
+    params.set("id", String(candidate.dbId));
+  } else if (candidate?.lat != null && candidate?.lon != null) {
+    params.set("lat", String(candidate.lat));
+    params.set("lon", String(candidate.lon));
+  } else {
+    return null;
+  }
+  const url = `${API_BASE}/course-geometry.php?${params.toString()}`;
+  const res = await fetchWithTimeout(url, { headers: { Accept: "application/json" } }, 10000);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error("Course geometry lookup failed");
+  const data = await res.json();
+  return { holes: data.holes || [], teeSets: [] };
+}
+
 async function fetchWithTimeout(url, options, timeoutMs) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
@@ -2408,7 +2472,19 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
     }
     setNearbyLoading(true); setOsmStatus(""); setOsmResults([]); setOsmFailed(false);
     try {
-      const results = await searchOSMNearby(loc.lat, loc.lon, NEARBY_RADIUS_METERS);
+      // offline-imported data first (3 Nov) — see fetchNearbyCoursesFromDB. An empty result here
+      // just means "nothing imported near here yet" (the imported region starts with South
+      // Africa), which falls straight through to the exact same live Overpass search as before;
+      // a DB network failure degrades the same way rather than failing the whole lookup.
+      let results = [];
+      try {
+        results = await fetchNearbyCoursesFromDB(loc.lat, loc.lon, NEARBY_RADIUS_METERS);
+      } catch (e) {
+        results = [];
+      }
+      if (results.length === 0) {
+        results = await searchOSMNearby(loc.lat, loc.lon, NEARBY_RADIUS_METERS);
+      }
       setOsmResults(results);
       if (results.length === 0) {
         setOsmStatus("No golf courses found on OpenStreetMap within 25 miles of you — try searching by name instead.");
@@ -2446,6 +2522,24 @@ function CoursesTab({ courses, setCourses, location, requestLocation, distanceUn
       setOsmLoading(false);
       return;
     }
+
+    // offline-imported data first (3 Nov) — see fetchCourseGeometryFromDB. Tried before the live
+    // Overpass path since it's our own server (no mirrors, no rate limit); a null result just
+    // means this course isn't in the imported dataset yet (not an error), and a DB failure
+    // degrades the exact same way — either way, falls straight through to the live path below.
+    try {
+      const dbResult = await fetchCourseGeometryFromDB(candidate);
+      if (dbResult) {
+        cacheOSMHoles(key, dbResult.holes, dbResult.teeSets);
+        applyOSMHoles(dbResult.holes, dbResult.teeSets, null);
+        applyCourseRating(await ratingPromise);
+        setOsmLoading(false);
+        return;
+      }
+    } catch (e) {
+      // offline DB unreachable — fall through to live OSM below, same as a "not in the dataset" result
+    }
+
     try {
       const { holes: osmHoles, teeSets } = await fetchOSMHoles(candidate);
       cacheOSMHoles(key, osmHoles, teeSets); // cache successes AND genuine zero-result answers — never cache a failure
