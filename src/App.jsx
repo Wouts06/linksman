@@ -597,15 +597,98 @@ async function searchOSMCourses(query) {
   const res = await fetchWithTimeout(url, { headers: { Accept: "application/json" } }, 15000);
   if (!res.ok) throw new Error("Course search failed");
   const data = await res.json();
-  return data.map((d) => ({
+  const results = data.map((d) => ({
     osmType: d.osm_type,
     osmId: d.osm_id,
+    // Nominatim's jsonv2 "type" field (not to be confused with osmType, which is node/way/
+    // relation) — "golf_course" for an actual course result, something else (a road, a museum,
+    // a city — see combineMultiWayCourseResults below) for anything that just matched the search
+    // text. Only used to decide what's eligible to merge; existing callers that only read
+    // name/displayName/lat/lon/boundingbox/osmType/osmId are unaffected by this extra field.
+    type: d.type,
     name: (d.display_name || "").split(",")[0],
     displayName: d.display_name,
     lat: Number(d.lat),
     lon: Number(d.lon),
     boundingbox: d.boundingbox ? d.boundingbox.map(Number) : null, // [south, north, west, east]
   }));
+  return combineMultiWayCourseResults(results);
+}
+
+/* 6 Nov — some real-world courses are mapped on OSM as TWO (or more) separate
+   `leisure=golf_course` ways instead of one (found on Metropolitan Golf Course, Cape Town: a
+   front-ish way with 10 holes and a back-ish way with 8, zero overlap, 18 total). Nominatim
+   returns each as its own same-named search result, with its OWN tight bounding box (no padding)
+   — so picking just one in the UI used to only pull in the holes physically inside THAT way's
+   footprint, silently losing the rest of the course. The user asked for this to "just work" even
+   when the location-based "Find courses near me" flow (which already avoids this, via its own
+   generous fixed bbox padding — see searchOSMNearby) isn't used or isn't available.
+   This merges same-named, geographically-close golf_course results into a single combined
+   candidate whose boundingbox is the union of every member's own box (plus a flat pad — the
+   union alone covers the course's own already-mapped ways, but a little extra margin also gives
+   a fighting chance of catching a feature like a water hazard that sits just outside both ways'
+   boundaries, which is a real case: the water-hazard ponds on this same course turned out to
+   border, not sit inside, the mapped course polygons). That wider box is what actually matters —
+   api/osm-holes.js tries OSM's primary API against the given bbox FIRST (see that file), and
+   that path doesn't care about osmType/osmId at all, so a union-sized box alone is enough to pull
+   every hole from every merged way in one request; the kept osmType/osmId (the first/largest
+   member's own) only matters for that file's Overpass `map_to_area` fallback, if the primary API
+   bbox path ever comes back empty.
+   Deliberately scoped to type === "golf_course" results only (Nominatim's own "type" field, see
+   searchOSMCourses above) — an unrelated same-named result (a road, a town) must never merge in,
+   and deliberately gated on proximity (members within ~3 miles of the first one in the group) so
+   two different real courses that happen to share a generic name (e.g. "Municipal Golf Course")
+   in different cities don't get merged into one nonsensical combined candidate. */
+function normalizeCourseName(name) {
+  return (name || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+const MULTI_WAY_MERGE_RADIUS_MILES = 3; // a single course is never remotely this big
+const MULTI_WAY_MERGE_PAD_DEG = 0.003; // ~300m — see the comment above on why this exists
+function combineMultiWayCourseResults(results) {
+  const golfCourses = results.filter((r) => r.type === "golf_course" && r.boundingbox);
+  const others = results.filter((r) => !(r.type === "golf_course" && r.boundingbox));
+
+  const byName = new Map(); // normalized name -> array of same-named candidates, in order
+  golfCourses.forEach((r) => {
+    const key = normalizeCourseName(r.name);
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key).push(r);
+  });
+
+  const merged = [];
+  byName.forEach((group) => {
+    if (group.length === 1) {
+      merged.push(group[0]);
+      return;
+    }
+    // Cluster by proximity to the group's own first member, rather than assuming every
+    // same-named result belongs together — a same-named course on the other side of the country
+    // (or world) must stay a separate, un-merged result.
+    const clusters = [];
+    group.forEach((r) => {
+      const cluster = clusters.find((c) => haversine(c[0].lat, c[0].lon, r.lat, r.lon) <= MULTI_WAY_MERGE_RADIUS_MILES);
+      if (cluster) cluster.push(r);
+      else clusters.push([r]);
+    });
+    clusters.forEach((cluster) => {
+      if (cluster.length === 1) {
+        merged.push(cluster[0]);
+        return;
+      }
+      const south = Math.min(...cluster.map((c) => c.boundingbox[0])) - MULTI_WAY_MERGE_PAD_DEG;
+      const north = Math.max(...cluster.map((c) => c.boundingbox[1])) + MULTI_WAY_MERGE_PAD_DEG;
+      const west = Math.min(...cluster.map((c) => c.boundingbox[2])) - MULTI_WAY_MERGE_PAD_DEG;
+      const east = Math.max(...cluster.map((c) => c.boundingbox[3])) + MULTI_WAY_MERGE_PAD_DEG;
+      const primary = cluster[0]; // only used as the map_to_area fallback's reference — see comment above
+      merged.push({
+        ...primary,
+        displayName: `${primary.displayName} (${cluster.length} mapped sections combined)`,
+        boundingbox: [south, north, west, east],
+      });
+    });
+  });
+
+  return [...merged, ...others];
 }
 
 /* rating/slope auto-fill (19 Aug) — GolfCourseAPI lookup by name, proxied server-side (see
