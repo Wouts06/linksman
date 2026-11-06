@@ -76,11 +76,22 @@ const GOLF_FILTERS = [
   { type: "way", value: "tee" },
   { type: "node", value: "green" },
   { type: "way", value: "green" },
+  { type: "relation", value: "green" }, // defensive -- same multipolygon reasoning as water_hazard below
   { type: "way", value: "bunker" },
   { type: "node", value: "bunker" }, // discouraged by the wiki but seen in practice; harmless to include
+  { type: "relation", value: "bunker" }, // defensive -- same multipolygon reasoning as water_hazard below
   { type: "way", value: "water_hazard" },
+  // 6 Nov (relation round) -- confirmed real via a user screenshot of the OSM "Edit feature" tag
+  // panel: their pond is tagged golf=water_hazard + natural=water + type=multipolygon, i.e. it's
+  // a RELATION, not a plain way. A multipolygon is OSM's standard way to map an area assembled
+  // from more than one way (an island/hole in the middle, or just several ways stitched into one
+  // ring) -- nothing below ever fetched relations before this, on either the primary-API path or
+  // the Overpass path, so a hazard mapped this way was completely invisible to every query this
+  // file ran, regardless of bbox size/padding. That ruled out the padding theory for this
+  // specific case even though padding separately mattered for other features.
+  { type: "relation", value: "water_hazard" },
   { type: "way", value: "lateral_water_hazard" },
-  { type: "way", value: "fairway" }, // 5 Nov — vector-diagram hole view; fairways are ways only in practice
+  { type: "relation", value: "lateral_water_hazard" }, // same reasoning as water_hazard above
 ];
 
 function buildFilters(scope) {
@@ -147,6 +158,20 @@ async function fetchFromPrimaryAPI(south, north, west, east) {
       if (el.type === "node" && el.lat != null && el.lon != null) nodeCoords.set(el.id, { lat: el.lat, lon: el.lon });
     }
 
+    // Resolve geometry for EVERY way in the response, not just golf-tagged ones (6 Nov, relation
+    // round) — a relation's own element never carries inline coordinates, only a list of member
+    // {type, ref, role} entries, so resolving a relation's shape means looking up its member way
+    // IDs here. Most ways in a bbox dump aren't relation members and this map is cheap, so it's
+    // simplest to just resolve all of them once up front rather than resolving on demand per
+    // relation.
+    const wayGeometry = new Map();
+    for (const el of rawElements) {
+      if (el.type === "way") {
+        const geometry = (el.nodes || []).map((id) => nodeCoords.get(id)).filter(Boolean);
+        if (geometry.length) wayGeometry.set(el.id, geometry);
+      }
+    }
+
     const elements = [];
     for (const el of rawElements) {
       const golfValue = el.tags && el.tags.golf;
@@ -154,8 +179,25 @@ async function fetchFromPrimaryAPI(south, north, west, east) {
       if (el.type === "node") {
         elements.push({ type: "node", id: el.id, lat: el.lat, lon: el.lon, tags: el.tags });
       } else if (el.type === "way") {
-        const geometry = (el.nodes || []).map((id) => nodeCoords.get(id)).filter(Boolean);
-        if (!geometry.length) continue; // referenced nodes weren't in this bbox response — can't place it
+        const geometry = wayGeometry.get(el.id);
+        if (!geometry || !geometry.length) continue; // referenced nodes weren't in this bbox response — can't place it
+        elements.push({ type: "way", id: el.id, tags: el.tags, geometry });
+      } else if (el.type === "relation") {
+        // Confirmed real via user screenshot: a water hazard mapped as a multipolygon relation
+        // (golf=water_hazard + natural=water + type=multipolygon), not a plain way. Concatenate
+        // the "outer"-role member ways' own geometry (each resolved via wayGeometry above) into
+        // one flat array and emit it AS a "way" element — shape-compatible with the plain-way
+        // case above, so the client's existing per-polygon logic (collectPolygons etc. in
+        // App.jsx, which only ever filters on tags.golf, never on element type) needs zero
+        // changes to consume it.
+        const members = el.members || [];
+        const outerIds = members.filter((m) => m.type === "way" && m.role === "outer").map((m) => m.ref);
+        // Fall back to every member way if none is explicitly tagged "outer" — some mappers leave
+        // the role blank on a simple single-ring multipolygon, and an untagged-role way is still
+        // almost always the one ring that matters for a small course feature like this.
+        const idsToUse = outerIds.length ? outerIds : members.filter((m) => m.type === "way").map((m) => m.ref);
+        const geometry = idsToUse.flatMap((id) => wayGeometry.get(id) || []);
+        if (!geometry.length) continue; // member ways weren't in this bbox response — can't place it
         elements.push({ type: "way", id: el.id, tags: el.tags, geometry });
       }
     }
@@ -163,6 +205,28 @@ async function fetchFromPrimaryAPI(south, north, west, east) {
   } catch (e) {
     return null; // network error, timeout, bad JSON — fall back to Overpass
   }
+}
+
+// Overpass's own `out geom;` shape for a relation is nested one level deeper than for a way: a
+// relation element carries `members: [{type, ref, role, geometry: [{lat, lon}, ...]}, ...]`, with
+// each member way's own coordinates inlined under THAT member, not a flat top-level `.geometry`
+// on the relation itself (6 Nov, relation round — same water-hazard-as-multipolygon case as
+// fetchFromPrimaryAPI above, just normalizing the other upstream's different response shape for
+// the same fix). Flattens that into the same `{type:"way", id, tags, geometry}` shape used
+// everywhere else in this file, so the client never has to know which upstream answered, or that
+// a "way" element it received started life as a relation.
+function flattenOverpassRelations(data) {
+  if (!data || !Array.isArray(data.elements)) return data;
+  const elements = data.elements.map((el) => {
+    if (el.type !== "relation") return el;
+    const members = el.members || [];
+    const outer = members.filter((m) => m.type === "way" && m.role === "outer" && Array.isArray(m.geometry));
+    const chosen = outer.length ? outer : members.filter((m) => m.type === "way" && Array.isArray(m.geometry));
+    const geometry = chosen.flatMap((m) => m.geometry);
+    if (!geometry.length) return el; // nothing resolvable — leave as-is, downstream filters on tags.golf anyway
+    return { type: "way", id: el.id, tags: el.tags, geometry };
+  });
+  return { ...data, elements };
 }
 
 async function runQuery(query) {
@@ -194,7 +258,7 @@ async function runQuery(query) {
         errors.push(`${endpoint} -> HTTP ${upstream.status}`);
         continue; // try the next mirror — 406/429/504 here is transient/anti-abuse, not "no data"
       }
-      return { data: await upstream.json(), error: null };
+      return { data: flattenOverpassRelations(await upstream.json()), error: null };
     } catch (e) {
       errors.push(`${endpoint} -> ${e && e.name === "TimeoutError" ? "timed out" : (e && e.message) || "unknown error"}`);
     }

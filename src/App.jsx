@@ -624,26 +624,33 @@ async function searchOSMCourses(query) {
    when the location-based "Find courses near me" flow (which already avoids this, via its own
    generous fixed bbox padding — see searchOSMNearby) isn't used or isn't available.
    This merges same-named, geographically-close golf_course results into a single combined
-   candidate whose boundingbox is the union of every member's own box (plus a flat pad — the
-   union alone covers the course's own already-mapped ways, but a little extra margin also gives
-   a fighting chance of catching a feature like a water hazard that sits just outside both ways'
-   boundaries, which is a real case: the water-hazard ponds on this same course turned out to
-   border, not sit inside, the mapped course polygons). That wider box is what actually matters —
-   api/osm-holes.js tries OSM's primary API against the given bbox FIRST (see that file), and
-   that path doesn't care about osmType/osmId at all, so a union-sized box alone is enough to pull
-   every hole from every merged way in one request; the kept osmType/osmId (the first/largest
-   member's own) only matters for that file's Overpass `map_to_area` fallback, if the primary API
-   bbox path ever comes back empty.
+   candidate whose boundingbox is the union of every member's own box, padded — and ALSO pads
+   every single, un-merged golf_course result's own box the same way (added same day, second
+   round): real course features routinely sit just outside the mapped `leisure=golf_course`
+   polygon's own tight boundary, not just across a multi-way split. Confirmed directly on this
+   same course: a water hazard the user had just mapped (and a green-side bunker, separately) were
+   BOTH found to be physically outside the course way's own bounding box — a 300m pad (this fix's
+   first version) still missed the water hazard; widening to ~650m found it. That wider box is
+   what actually matters — api/osm-holes.js tries OSM's primary API against the given bbox FIRST
+   (see that file), and that path doesn't care about osmType/osmId at all, so a wide-enough box
+   alone is enough to pull in every hole/bunker/hazard near the course, merged or not, in one
+   request; the kept osmType/osmId (the first/largest member's own) only matters for that file's
+   Overpass `map_to_area` fallback, if the primary API bbox path ever comes back empty.
    Deliberately scoped to type === "golf_course" results only (Nominatim's own "type" field, see
-   searchOSMCourses above) — an unrelated same-named result (a road, a town) must never merge in,
-   and deliberately gated on proximity (members within ~3 miles of the first one in the group) so
-   two different real courses that happen to share a generic name (e.g. "Municipal Golf Course")
-   in different cities don't get merged into one nonsensical combined candidate. */
+   searchOSMCourses above) — an unrelated same-named result (a road, a town) must never merge in
+   or get a course-sized pad, and the MERGE itself is deliberately gated on proximity (members
+   within ~3 miles of the first one in the group) so two different real courses that happen to
+   share a generic name (e.g. "Municipal Golf Course") in different cities don't get merged into
+   one nonsensical combined candidate — the padding alone (650m) is far too small to risk that on
+   its own, courses just aren't usually that close together. */
 function normalizeCourseName(name) {
   return (name || "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 const MULTI_WAY_MERGE_RADIUS_MILES = 3; // a single course is never remotely this big
-const MULTI_WAY_MERGE_PAD_DEG = 0.003; // ~300m — see the comment above on why this exists
+const COURSE_BBOX_PAD_DEG = 0.006; // ~650m — see the comment above for how this was tuned
+function padBoundingBox([south, north, west, east], padDeg) {
+  return [south - padDeg, north + padDeg, west - padDeg, east + padDeg];
+}
 function combineMultiWayCourseResults(results) {
   const golfCourses = results.filter((r) => r.type === "golf_course" && r.boundingbox);
   const others = results.filter((r) => !(r.type === "golf_course" && r.boundingbox));
@@ -658,7 +665,7 @@ function combineMultiWayCourseResults(results) {
   const merged = [];
   byName.forEach((group) => {
     if (group.length === 1) {
-      merged.push(group[0]);
+      merged.push({ ...group[0], boundingbox: padBoundingBox(group[0].boundingbox, COURSE_BBOX_PAD_DEG) });
       return;
     }
     // Cluster by proximity to the group's own first member, rather than assuming every
@@ -672,18 +679,18 @@ function combineMultiWayCourseResults(results) {
     });
     clusters.forEach((cluster) => {
       if (cluster.length === 1) {
-        merged.push(cluster[0]);
+        merged.push({ ...cluster[0], boundingbox: padBoundingBox(cluster[0].boundingbox, COURSE_BBOX_PAD_DEG) });
         return;
       }
-      const south = Math.min(...cluster.map((c) => c.boundingbox[0])) - MULTI_WAY_MERGE_PAD_DEG;
-      const north = Math.max(...cluster.map((c) => c.boundingbox[1])) + MULTI_WAY_MERGE_PAD_DEG;
-      const west = Math.min(...cluster.map((c) => c.boundingbox[2])) - MULTI_WAY_MERGE_PAD_DEG;
-      const east = Math.max(...cluster.map((c) => c.boundingbox[3])) + MULTI_WAY_MERGE_PAD_DEG;
+      const south = Math.min(...cluster.map((c) => c.boundingbox[0]));
+      const north = Math.max(...cluster.map((c) => c.boundingbox[1]));
+      const west = Math.min(...cluster.map((c) => c.boundingbox[2]));
+      const east = Math.max(...cluster.map((c) => c.boundingbox[3]));
       const primary = cluster[0]; // only used as the map_to_area fallback's reference — see comment above
       merged.push({
         ...primary,
         displayName: `${primary.displayName} (${cluster.length} mapped sections combined)`,
-        boundingbox: [south, north, west, east],
+        boundingbox: padBoundingBox([south, north, west, east], COURSE_BBOX_PAD_DEG),
       });
     });
   });
@@ -1201,11 +1208,16 @@ function parseOSMHoleElements(data) {
       if (geom.length < 1) continue;
       const centroidLat = geom.reduce((s, p) => s + p.lat, 0) / geom.length;
       const centroidLon = geom.reduce((s, p) => s + p.lon, 0) / geom.length;
-      const number = nearestHoleNumber(centroidLat, centroidLon, holes, "both");
-      if (number == null) continue;
+      // nearestHoleNumberS (plural, see that function) — a shared-green/shared-fairway hole pair
+      // can genuinely share the same bunker/hazard/fairway, so this attaches it to every close
+      // contender instead of forcing a single winner (6 Nov).
+      const numbers = nearestHoleNumbers(centroidLat, centroidLon, holes, "both");
+      if (!numbers.length) continue;
       const vertices = geom.map((p) => ({ lat: p.lat, lon: p.lon }));
-      if (!byHole.has(number)) byHole.set(number, []);
-      byHole.get(number).push(vertices);
+      for (const number of numbers) {
+        if (!byHole.has(number)) byHole.set(number, []);
+        byHole.get(number).push(vertices);
+      }
     }
     return byHole;
   }
@@ -1325,6 +1337,44 @@ function nearestHoleNumber(lat, lon, holes, anchor = "tee") {
     }
   }
   return best;
+}
+
+/* Like nearestHoleNumber above, but can return MORE than one hole when there's a genuinely close
+   second contender, instead of always forcing a single winner. Added 6 Nov specifically for
+   collectPolygons (bunkers/hazards/fairways) below, after the user reported Hole 1 on a real
+   course only showing 1 of 3+ bunkers they'd mapped as "in play." Root-caused via the live OSM
+   data: Metropolitan Golf Course routes Hole 1 and Hole 10 as a shared-green, shared-fairway pair
+   (an "out and back" links-style corridor — their own golf=fairway way is literally described
+   "Hole 1 and Hole 10 Fairway" by the mapper), so the two holes' own green reference points sit
+   only ~55m apart. A bunker measured at 29.1m from Hole 1's green and 24.0m from Hole 10's green
+   — a 5m margin — is obviously the SAME shared-green bunker, genuinely in play for both holes, but
+   nearestHoleNumber's hard "closest wins" match assigned it to Hole 10 only, silently dropping it
+   from Hole 1's own bunker list (confirmed: this is exactly the bunker the user could see on
+   screen but the app wasn't counting). OSM has no parent-hole tagging for bunkers/hazards at all
+   (see collectPolygons), so this kind of near-tie is structurally unavoidable on a shared-corridor
+   course — the fix is to stop forcing a single winner when the margin is this small, not to try to
+   out-guess which one hole "really" owns it.
+   `marginMeters` (15m) was chosen empirically: comfortably past the real 5m shared-bunker case
+   above, while still excluding a genuinely different bunker found in the same investigation that
+   was 55.1m from Hole 1 but only 19.8m from Hole 10 (a 35m margin — clearly Hole 10's own, not
+   shared) — that one correctly stays Hole-10-only against this threshold. */
+function nearestHoleNumbers(lat, lon, holes, anchor = "tee", marginMeters = 15) {
+  const dists = [];
+  for (const h of holes) {
+    const candidates = anchor === "both"
+      ? [[h.teeLat, h.teeLon], [h.greenLat, h.greenLon]]
+      : [[anchor === "green" ? h.greenLat : h.teeLat, anchor === "green" ? h.greenLon : h.teeLon]];
+    let best = Infinity;
+    for (const [aLat, aLon] of candidates) {
+      if (aLat == null || aLon == null) continue;
+      const d = haversineMeters(lat, lon, aLat, aLon);
+      if (d < best) best = d;
+    }
+    if (best < Infinity) dists.push({ number: h.number, dist: best });
+  }
+  if (!dists.length) return [];
+  const bestDist = Math.min(...dists.map((d) => d.dist));
+  return dists.filter((d) => d.dist <= bestDist + marginMeters).map((d) => d.number);
 }
 
 /* "front" or "back" of the green from wherever a shot is being measured from right now — not a
