@@ -92,6 +92,19 @@ const GOLF_FILTERS = [
   { type: "relation", value: "water_hazard" },
   { type: "way", value: "lateral_water_hazard" },
   { type: "relation", value: "lateral_water_hazard" }, // same reasoning as water_hazard above
+  // 6 Nov (fairway-restoration round) -- golf=fairway was documented as added here on 5 Nov (see
+  // the project milestone doc) but was found MISSING from this array entirely while investigating
+  // a user report that the diagram view had stopped drawing the fairway shape and that bunkers
+  // positioned along the fairway (as opposed to greenside) were being dropped. Whatever caused the
+  // entry to go missing, its absence alone fully explains the diagram-view symptom: with no
+  // golf=fairway element ever fetched, App.jsx's hole.fairways is always null, so the diagram
+  // view's fairway polygon has nothing to draw. It's also now a load-bearing INPUT to a new
+  // client-side fix (see App.jsx's collectPolygons/pointInPolygon) that uses a hole's own fairway
+  // shape to definitively settle which hole a mid-fairway bunker belongs to, instead of relying
+  // solely on nearest-tee/green distance -- so restoring this also directly helps the
+  // tee-box/fairway bunker mis-attribution the user reported.
+  { type: "way", value: "fairway" },
+  { type: "relation", value: "fairway" }, // defensive -- same multipolygon reasoning as the others above
 ];
 
 function buildFilters(scope) {

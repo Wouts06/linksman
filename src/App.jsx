@@ -1111,6 +1111,23 @@ function nearestVertexFrom(lat, lon, points) {
   return best;
 }
 
+/* Standard ray-casting point-in-polygon test, `vertices` as {lat, lon} (6 Nov, fairway-
+   containment round). Treats lon as x and lat as y — no geodesic correction, which is fine at the
+   sub-kilometre scale a single fairway polygon spans; this only needs to answer "is this bunker's
+   centroid inside this hole's own fairway shape," not measure a real distance. Used by
+   collectPolygons below to definitively settle which hole a bunker/hazard belongs to when a
+   fairway polygon is available, instead of relying solely on nearest-tee/green distance. */
+function pointInPolygon(lat, lon, vertices) {
+  let inside = false;
+  for (let i = 0, j = vertices.length - 1; i < vertices.length; j = i++) {
+    const xi = vertices[i].lon, yi = vertices[i].lat;
+    const xj = vertices[j].lon, yj = vertices[j].lat;
+    const intersect = (yi > lat) !== (yj > lat) && lon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
 /* Splits the raw Overpass response into (1) `golf=hole` ways — the existing per-hole
    par/distance/tee-green geometry — and (2) `golf=tee` points/areas — individual tee-box
    markers, some of which OpenStreetMap mappers colour-tag via `tee=<colour>` (e.g. `tee=red`;
@@ -1196,22 +1213,44 @@ function parseOSMHoleElements(data) {
   // golf=bunker / golf=water_hazard / golf=lateral_water_hazard elements (3 Nov, bunker-distance
   // round) — same polygon shape as a green, but unlike a green there can legitimately be several
   // per hole (and a hole can have none), so these collect into an ARRAY per hole rather than a
-  // single polygon. Matched to a hole via nearestHoleNumber's "both" anchor (see that function's
-  // comment) since a bunker can sit anywhere along the hole's corridor, not just near the green.
-  // Per the OSM wiki, these have no parent-relation grouping at all — course membership is purely
-  // implied by location — so this spatial match is the only option, same as tees/greens, and
-  // coverage is noticeably patchier than tees/greens even on well-mapped courses.
-  function collectPolygons(golfValue) {
+  // single polygon. Per the OSM wiki, these have no parent-relation grouping at all — course
+  // membership is purely implied by location — so this spatial match is the only option, same as
+  // tees/greens, and coverage is noticeably patchier than tees/greens even on well-mapped courses.
+  //
+  // `fairwaysByHole`, when given (6 Nov, fairway-containment round): a definitive, non-distance-
+  // based match, tried FIRST. User report that triggered this: a bunker positioned along the
+  // fairway/off the tee was being "ignored entirely" on its own hole. Root cause confirmed by
+  // thinking through the purely-spatial nearest-tee/green heuristic's own weak spot — on a course
+  // with holes running close and parallel (common near a shared clubhouse/practice-area corridor),
+  // a mid-fairway bunker can genuinely sit closer to a NEIGHBOURING hole's tee or green than to its
+  // own hole's, which silently reattributes it there instead of just mismeasuring it. A fairway
+  // polygon settles this unambiguously where nearest-point distance can't: a bunker whose centroid
+  // falls INSIDE a hole's own mapped fairway shape is that hole's bunker, full stop, regardless of
+  // which hole's tee/green happens to be a few metres closer. Only used when it has an answer —
+  // most holes still have no fairway mapped (coverage is noticeably sparser than bunkers/hazards
+  // even on well-mapped courses), so this falls back to the existing nearestHoleNumbers "both"-
+  // anchor distance match whenever no fairway polygon contains the point, exactly as before this
+  // round for any course without fairway data.
+  function collectPolygons(golfValue, fairwaysByHole) {
     const byHole = new Map(); // hole number -> array of vertex arrays
     for (const el of elements.filter((e) => (e.tags || {}).golf === golfValue)) {
       const geom = el.geometry && el.geometry.length ? el.geometry : (el.lat != null ? [{ lat: el.lat, lon: el.lon }] : []);
       if (geom.length < 1) continue;
       const centroidLat = geom.reduce((s, p) => s + p.lat, 0) / geom.length;
       const centroidLon = geom.reduce((s, p) => s + p.lon, 0) / geom.length;
+      let numbers = null;
+      if (fairwaysByHole && fairwaysByHole.size) {
+        const containing = [];
+        fairwaysByHole.forEach((polys, holeNumber) => {
+          if (polys.some((poly) => pointInPolygon(centroidLat, centroidLon, poly))) containing.push(holeNumber);
+        });
+        if (containing.length) numbers = containing;
+      }
       // nearestHoleNumberS (plural, see that function) — a shared-green/shared-fairway hole pair
       // can genuinely share the same bunker/hazard/fairway, so this attaches it to every close
-      // contender instead of forcing a single winner (6 Nov).
-      const numbers = nearestHoleNumbers(centroidLat, centroidLon, holes, "both");
+      // contender instead of forcing a single winner (6 Nov), same fallback used when no fairway
+      // polygon claimed this point above.
+      if (!numbers) numbers = nearestHoleNumbers(centroidLat, centroidLon, holes, "both");
       if (!numbers.length) continue;
       const vertices = geom.map((p) => ({ lat: p.lat, lon: p.lon }));
       for (const number of numbers) {
@@ -1221,16 +1260,19 @@ function parseOSMHoleElements(data) {
     }
     return byHole;
   }
-  const bunkersByHole = collectPolygons("bunker");
-  const waterByHole = collectPolygons("water_hazard");
-  const lateralByHole = collectPolygons("lateral_water_hazard");
   // golf=fairway (5 Nov, vector-diagram round) — same array-per-hole shape as bunkers: real
   // courses occasionally map a dogleg's two bends as separate ways, so this isn't assumed to be
-  // a single polygon. Reuses the same "both"-anchor matching as bunkers/hazards, for the same
-  // reason (a fairway obviously isn't anchored to just the green). Coverage is sparser than
-  // bunkers/hazards in practice — most mappers who bother with bunkers/hazards still skip
-  // fairways — so a hole missing this is the common case, not a bug.
+  // a single polygon. Computed FIRST (6 Nov) so bunkers/hazards below can use it for a definitive
+  // containment match instead of only the "both"-anchor distance heuristic. Still matched to its
+  // own hole via that same distance heuristic (no fairway-of-fairways containment check — a
+  // fairway isn't contained by anything else), for the same reason as before: a fairway obviously
+  // isn't anchored to just the green. Coverage is sparser than bunkers/hazards in practice — most
+  // mappers who bother with bunkers/hazards still skip fairways — so a hole missing this is the
+  // common case, not a bug.
   const fairwaysByHole = collectPolygons("fairway");
+  const bunkersByHole = collectPolygons("bunker", fairwaysByHole);
+  const waterByHole = collectPolygons("water_hazard", fairwaysByHole);
+  const lateralByHole = collectPolygons("lateral_water_hazard", fairwaysByHole);
   for (const h of holes) {
     h.bunkers = bunkersByHole.get(h.number) || null;
     const hazards = [
