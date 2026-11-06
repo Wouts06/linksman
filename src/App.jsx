@@ -1770,7 +1770,10 @@ function waterHazardCarryDistances(hazards, anchorLat, anchorLon) {
    applied to hazards: the user asked specifically about bunkers, and water/lateral hazards are
    both rarer and more visually distinct, so the same mis-attribution risk matters less there. */
 function filterBunkersInPlay(bunkers, hole, bearingDegVal, maxMetresPastGreen = 20) {
-  if (!bunkers?.length || hole.teeLat == null || hole.greenLat == null || bearingDegVal == null) return bunkers;
+  // Always returns an array (never null/undefined), even when there's nothing to filter --
+  // every call site maps/forEaches the result directly without its own `|| []` guard, so a hole
+  // with no bunkers mapped at all (the common case -- most holes have none) must not crash render.
+  if (!bunkers?.length || hole.teeLat == null || hole.greenLat == null || bearingDegVal == null) return bunkers || [];
   const alongAxis = (lat, lon) => -projectLocal(lat, lon, hole.teeLat, hole.teeLon, bearingDegVal).y;
   const greenAlong = alongAxis(hole.greenLat, hole.greenLon);
   return bunkers.filter((vertices) => {
