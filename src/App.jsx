@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef, useId } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef, useId } from "react";
 import { MapContainer, TileLayer, Marker, CircleMarker, Polygon, useMapEvents, useMap } from "react-leaflet";
 import L from "leaflet";
 import markerIcon2x from "leaflet/dist/images/marker-icon-2x.png";
@@ -12,6 +12,30 @@ L.Icon.Default.mergeOptions({
   iconUrl: markerIcon,
   shadowUrl: markerShadow,
 });
+
+/* 6 Nov — leaflet-rotate gives Leaflet itself true bearing-aware rendering (pan, pinch-zoom,
+   fitBounds, marker/polygon positions all computed WITH the rotation baked in), replacing the
+   old approach of CSS-rotating a wrapper div around an otherwise-unrotated map. That old approach
+   is what caused two real bugs users hit: corner gaps at non-90°-multiple bearings (fixed
+   separately, see RotatedSurveyMap's own history) and, worse, inverted-feeling drag/pan — because
+   Leaflet computed drag deltas from raw screen-space mouse/touch coordinates but then applied the
+   resulting translation inside a DOM subtree that was ALREADY wrapped in a rotated ancestor, so
+   the translation effectively got rotated a second time. leaflet-rotate avoids this entirely by
+   making the map's own internal projection rotation-aware, so pan/zoom "just work" the way a
+   person expects regardless of bearing.
+   leaflet-rotate's bundle references the bare global `L` (classic Leaflet-plugin pattern — it
+   assumes `L` was already loaded via a <script> tag) rather than importing leaflet itself. With
+   ESM/Vite, `import L from "leaflet"` only creates a module-local binding, so `L` must be exposed
+   on `window` BEFORE leaflet-rotate's own top-level code runs. Static imports in a module all
+   execute before any of that module's own plain statements regardless of where a `window.L = L`
+   assignment is written lexically relative to those imports, so a *dynamic* `import()` — deferred
+   until this code actually runs — is required instead of a static import at the top of the file. */
+window.L = L;
+let leafletRotateReady = null;
+function ensureLeafletRotate() {
+  if (!leafletRotateReady) leafletRotateReady = import("leaflet-rotate");
+  return leafletRotateReady;
+}
 
 /* ---------- design tokens ---------- */
 const C = {
@@ -1974,78 +1998,99 @@ function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, d
   );
 }
 
-/* 6 Nov — read-only rotated map wrapper for GreenViewModal/HoleViewModal, replacing the old
-   same-size wrapper-div rotation + RotationDragLock pair after two real bugs the user hit on a
-   real device/real course:
-   1. "Grey diagonal corners" — the old pattern rotated a div the SAME size as the visible box.
-      Rotating a square/rectangle in place by anything other than a multiple of 90° makes its own
-      footprint swing partly outside the visible box on two sides while leaving the box's own
-      corners uncovered on the other two — exposing the modal's plain background there instead of
-      map tiles. Fixed with a standard "always covers the viewport" trick: render the actual map
-      at DIAGONAL size (a square whose side is the visible box's own diagonal), centered over the
-      box. A square sized to a rectangle's diagonal, centered at the same point, mathematically
-      contains that rectangle at ANY rotation angle (every point of the rectangle is within the
-      rectangle's own circumradius of the center — exactly the square's inradius — so it's always
-      inside). To avoid that bigger canvas also zooming the content OUT (fitBounds would otherwise
-      fit the hole into the whole oversized square), the extra margin is pushed into
-      boundsOptions.paddingTopLeft/paddingBottomRight instead of real framing, so the EFFECTIVE
-      fit area is still just the original visible box — the overflow margin exists purely to give
-      the rotation something real to show at the corners, not to change the zoom level.
-   2. "Can't pan/zoom" — RotationDragLock disabled Leaflet's own dragging outright whenever any
-      rotation was active, which used to only bite occasionally (GreenViewModal) but became the
-      ALWAYS-on state once HoleViewModal switched to a permanently-fixed orientation (5 Nov) — so
-      panning became permanently broken there. Both of these modals are read-only surveys (no
-      click-to-place accuracy to protect, unlike DriveMapModal's own, separate, intentional
-      drag-off-while-rotated behavior — that one stays exactly as it was, out of scope here), so
-      this wrapper just leaves Leaflet's native dragging/pinch-zoom alone and lets it work
-      normally; panning direction will feel "rotated" along with the view, which is an inherent,
-      accepted trade-off of rotating a non-rotation-aware map library via CSS — not a bug. */
-function RotatedSurveyMap({ bounds, singlePoint, singlePointZoom = 17, cssRotateDeg, extraPadding = 24, maxZoom = 22, children }) {
-  const outerRef = useRef(null);
-  const [size, setSize] = useState(null);
-  useLayoutEffect(() => {
-    const el = outerRef.current;
-    if (!el) return;
-    const measure = () => setSize({ w: el.clientWidth, h: el.clientHeight });
-    measure();
-    if (typeof ResizeObserver !== "undefined") {
-      const ro = new ResizeObserver(measure);
-      ro.observe(el);
-      return () => ro.disconnect();
-    }
-    window.addEventListener("resize", measure);
-    return () => window.removeEventListener("resize", measure);
-  }, []);
+/* 6 Nov — read-only rotated map wrapper for GreenViewModal/HoleViewModal. Originally built as a
+   CSS-rotated wrapper div around an otherwise-unrotated Leaflet map, which fixed the "always
+   rotated" orientation from earlier the same day but introduced two real bugs on a real device:
+   grey corners at non-90°-multiple bearings (fixed with an oversized diagonal square, see git
+   history), and — reported by the user right after that fix shipped — panning that "seems
+   inverted." Root cause of the inversion: Leaflet computes drag deltas from raw screen-space
+   mouse/touch coordinates, then applies the resulting translation to a DOM subtree that was
+   ALREADY nested inside a rotated ancestor — so the translation effectively gets rotated a SECOND
+   time, meaning the content visibly moves in a different direction than the finger/mouse dragged
+   it. That's an inherent limitation of rotating a rotation-UNAWARE map library via CSS; no amount
+   of patching the wrapper fixes it.
+   Replaced with `leaflet-rotate` (see the `ensureLeafletRotate` loader above), which patches
+   Leaflet's own Map class to understand bearing directly — drag deltas, pinch-zoom, marker/
+   polygon projection and fitBounds are all computed WITH the rotation baked in, so panning feels
+   natural regardless of bearing, with no wrapper-div trick needed at all (confirmed via a
+   standalone prototype: tile coverage, drag direction, and corner coverage all check out).
+   Two non-obvious things this plugin requires, both load-bearing (figuratively) for this to work:
+   1. `map.setBearing()` can't be called until the map already has a view (center+zoom) — calling
+      it as part of react-leaflet's declarative `bounds`-prop mount crashes with "Set map center
+      and zoom first." So this mounts with a plain placeholder center/zoom, then an effect
+      (FitBearingView below) calls setBearing() then sets the real view imperatively once the map
+      instance exists.
+   2. leaflet-rotate's bearing is the raw clockwise CSS rotate() angle applied to its internal
+      rotate-pane — NOT the Mapbox-GL-style "compass direction pointing up" convention one might
+      expect from the word "bearing." Empirically (confirmed in the standalone prototype: passing
+      the raw tee→green compass bearing rotated the green marker further AWAY from vertical, not
+      toward it), what actually puts "bearing" at the top of the screen is its NEGATION — the same
+      sign flip this file already uses elsewhere as `cssRotateDeg = -bearing`.
+   leaflet-rotate's own fitBounds() also turned out to be noticeably conservative under rotation in
+   testing (it fit a hole's bounding box into well under half the available space) — likely because
+   it fits the full unrotated lat/lon bounding rectangle's rotated footprint rather than the
+   tightest rotated-frame bbox of the actual points. So the zoom/center here are instead computed
+   directly via the same projectLocal rotation math the SVG diagram view already uses (see
+   computeTightView below), which fits tightly by construction and needs no plugin cooperation. */
+function RotatedSurveyMap({ points, singlePointZoom = 17, bearing, padding = 24, maxZoom = 22, children }) {
+  const [rotateReady, setRotateReady] = useState(() => typeof L.Map.prototype.setBearing === "function");
+  useEffect(() => {
+    if (rotateReady) return;
+    let cancelled = false;
+    ensureLeafletRotate().then(() => { if (!cancelled) setRotateReady(true); });
+    return () => { cancelled = true; };
+  }, [rotateReady]);
 
-  const rotated = !!cssRotateDeg;
-  const diag = size ? Math.ceil(Math.sqrt(size.w * size.w + size.h * size.h)) : null;
-  // when there's no rotation, a same-size box already covers itself fully -- skip the oversize
-  // entirely so the unrotated (north-up fallback) case still zooms in exactly as tight as before.
-  const boxSize = rotated ? diag : (size ? Math.max(size.w, size.h) : null);
-  const padX = size ? (rotated ? (diag - size.w) / 2 : 0) + extraPadding : extraPadding;
-  const padY = size ? (rotated ? (diag - size.h) / 2 : 0) + extraPadding : extraPadding;
+  const normPoints = (points || [])
+    .map((p) => (Array.isArray(p) ? { lat: p[0], lon: p[1] } : p))
+    .filter((p) => p && p.lat != null && p.lon != null);
+  if (!normPoints.length) return null;
+  const origin = normPoints[0];
+
+  if (!rotateReady) {
+    // leaflet-rotate loads as a dynamic import so it can set up `window.L` first (see
+    // ensureLeafletRotate's own comment) -- in production this resolves on the same tick, well
+    // before a person could possibly open a map modal, so this placeholder is not expected to be
+    // visible in practice; it exists purely so a map is never rendered rotation-unaware.
+    return <div style={{ height: "100%", width: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: C.turf, fontFamily: sans, fontSize: 12 }}>Loading map…</div>;
+  }
 
   return (
-    <div ref={outerRef} style={{ height: "100%", width: "100%", position: "relative", overflow: "hidden" }}>
-      {size && (
-        <div style={{
-          position: "absolute", top: "50%", left: "50%", width: boxSize, height: boxSize,
-          marginLeft: -boxSize / 2, marginTop: -boxSize / 2,
-          transform: cssRotateDeg ? `rotate(${cssRotateDeg}deg)` : undefined,
-        }}>
-          <MapContainer
-            {...(bounds ? { bounds, boundsOptions: { paddingTopLeft: [padX, padY], paddingBottomRight: [padX, padY] } } : { center: singlePoint, zoom: singlePointZoom })}
-            maxZoom={maxZoom}
-            zoomSnap={0.1}
-            zoomDelta={0.1}
-            style={{ height: "100%", width: "100%" }}
-          >
-            {children}
-          </MapContainer>
-        </div>
-      )}
-    </div>
+    <MapContainer
+      center={[origin.lat, origin.lon]}
+      zoom={singlePointZoom}
+      rotate={true}
+      bearing={0}
+      rotateControl={false}
+      touchRotate={false}
+      maxZoom={maxZoom}
+      zoomSnap={0.1}
+      zoomDelta={0.1}
+      style={{ height: "100%", width: "100%" }}
+    >
+      <FitBearingView points={normPoints} origin={origin} bearing={bearing} singlePointZoom={singlePointZoom} padding={padding} maxZoom={maxZoom} />
+      {children}
+    </MapContainer>
   );
+}
+
+function FitBearingView({ points, origin, bearing, singlePointZoom, padding, maxZoom }) {
+  const map = useMap();
+  useEffect(() => {
+    map.setBearing(bearing != null ? -bearing : 0);
+    if (points.length < 2) {
+      map.setView([origin.lat, origin.lon], singlePointZoom, { animate: false });
+      return;
+    }
+    const size = map.getSize();
+    const availW = Math.max(size.x - padding * 2, 20);
+    const availH = Math.max(size.y - padding * 2, 20);
+    const { center, zoom } = computeTightView(points, origin.lat, origin.lon, bearing || 0, availW, availH);
+    map.setView([center.lat, center.lon], Math.max(10, Math.min(maxZoom, zoom)), { animate: false });
+    // runs once per mount, deliberately not re-fitting on every incidental map-instance change
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [map]);
+  return null;
 }
 
 /* 16 Aug — a focused, read-only close-up of just the green, requested after the DriveMapModal's
@@ -2065,8 +2110,10 @@ function GreenViewModal({ hole, fromLat, fromLon, distanceUnit, onClose }) {
   const centerLat = hasPolygon ? bounds.getCenter().lat : greenLat;
   const centerLon = hasPolygon ? bounds.getCenter().lng : greenLon;
   const bearing = bearingDeg(fromLat, fromLon, centerLat, centerLon);
-  const cssRotateDeg = bearing != null ? -bearing : 0;
   const distanceToGreen = fromLat != null && centerLat != null ? haversineYards(fromLat, fromLon, centerLat, centerLon) : null;
+  const greenPoints = hasPolygon
+    ? hole.greenPolygon.map((p) => ({ lat: p.lat, lon: p.lon }))
+    : (greenLat != null ? [{ lat: greenLat, lon: greenLon }] : []);
 
   if (greenLat == null && !hasPolygon) {
     return (
@@ -2095,11 +2142,10 @@ function GreenViewModal({ hole, fromLat, fromLon, distanceUnit, onClose }) {
             <div style={{ position: "absolute", top: 6, left: "50%", transform: "translateX(-50%)", zIndex: 500, fontSize: 18, color: C.white, textShadow: "0 1px 3px rgba(0,0,0,0.6)", pointerEvents: "none" }}>⬆</div>
           )}
           <RotatedSurveyMap
-            bounds={hasPolygon ? bounds : null}
-            singlePoint={[greenLat, greenLon]}
+            points={greenPoints}
             singlePointZoom={20}
-            cssRotateDeg={cssRotateDeg}
-            extraPadding={10}
+            bearing={bearing}
+            padding={10}
           >
             <TileLayer
               url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
@@ -2142,6 +2188,39 @@ function projectLocal(lat, lon, originLat, originLon, bearingDegVal) {
   const rotX = xM * Math.cos(rad) - yM * Math.sin(rad);
   const rotY = xM * Math.sin(rad) + yM * Math.cos(rad);
   return { x: rotX, y: -rotY }; // "up" (toward the green) is negative y in screen/SVG terms
+}
+/* 6 Nov — projectLocal's inverse: given a point in its already-rotated local-metres frame, recover
+   the lat/lon. Used by computeTightView below to turn a computed bbox center back into a real
+   coordinate for map.setView(). The forward transform's 2x2 part is a pure rotation matrix, whose
+   inverse is just its transpose — no matrix inversion needed. */
+function unprojectLocal(x, yScreen, originLat, originLon, bearingDegVal) {
+  const mPerDegLat = 110540;
+  const mPerDegLon = 111320 * Math.cos((originLat * Math.PI) / 180);
+  const rotX = x, rotY = -yScreen;
+  const rad = ((bearingDegVal || 0) * Math.PI) / 180;
+  const xM = rotX * Math.cos(rad) + rotY * Math.sin(rad);
+  const yM = -rotX * Math.sin(rad) + rotY * Math.cos(rad);
+  return { lat: originLat + yM / mPerDegLat, lon: originLon + xM / mPerDegLon };
+}
+/* 6 Nov — the tight-fit replacement for leaflet-rotate's own (empirically conservative, see
+   RotatedSurveyMap's comment) fitBounds(). Projects every point into the already-bearing-rotated
+   local-metres frame via projectLocal, finds the bounding box THERE (so the box is tight against
+   the actual rotated footprint, not the rotated footprint of an unrotated lat/lon bbox, which is
+   larger), and computes the Leaflet zoom level that fits that box's width/height into the given
+   pixel box. Needs the ground-meters-per-pixel relationship, which (because Leaflet's resolution
+   formula is defined in projected Web Mercator meters, not real ground meters) depends on
+   latitude: real ground meters = projected meters * cos(latitude), hence the cosLat factor. */
+function computeTightView(points, originLat, originLon, bearingDegVal, availW, availH) {
+  const local = points.map((p) => projectLocal(p.lat, p.lon, originLat, originLon, bearingDegVal));
+  const xs = local.map((p) => p.x), ys = local.map((p) => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const xSpan = Math.max(maxX - minX, 1), ySpan = Math.max(maxY - minY, 1);
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+  const center = unprojectLocal(cx, cy, originLat, originLon, bearingDegVal);
+  const cosLat = Math.cos((originLat * Math.PI) / 180);
+  const zForX = Math.log2((156543.03392804097 * cosLat * availW) / xSpan);
+  const zForY = Math.log2((156543.03392804097 * cosLat * availH) / ySpan);
+  return { center, zoom: Math.min(zForX, zForY) };
 }
 
 /* 5 Nov — vector/diagram alternative to the satellite HoleViewModal, toggled from within it.
@@ -2353,7 +2432,7 @@ function HoleViewModal({ hole, fromLat, fromLon, distanceUnit, onClose }) {
           {viewMode === "diagram" ? (
             <HoleDiagramVector hole={holeForDisplay} bearing={bearing} distanceUnit={distanceUnit} bunkerDistances={bunkerDistances} hazardDistances={hazardDistances} />
           ) : (
-            <RotatedSurveyMap bounds={bounds} singlePoint={singlePoint} singlePointZoom={17} cssRotateDeg={cssRotateDeg} extraPadding={24}>
+            <RotatedSurveyMap points={boundsPoints} singlePointZoom={17} bearing={bearing} padding={24}>
               <TileLayer
                 url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
                 attribution="Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community"
