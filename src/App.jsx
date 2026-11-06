@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback, useRef, useId } from "react";
+import React, { useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef, useId } from "react";
 import { MapContainer, TileLayer, Marker, CircleMarker, Polygon, useMapEvents, useMap } from "react-leaflet";
 import L from "leaflet";
 import markerIcon2x from "leaflet/dist/images/marker-icon-2x.png";
@@ -1753,6 +1753,34 @@ function waterHazardCarryDistances(hazards, anchorLat, anchorLon) {
     .sort((a, b) => a.frontYards - b.frontYards);
 }
 
+/* 6 Nov — drops bunkers that sit implausibly far past this hole's own green, a cheap heuristic
+   for "is this actually in play for this hole" requested after the user spotted bunkers that
+   clearly belonged to a neighbouring hole showing up on theirs. Real-world golf=bunker matching
+   is purely spatial (nearestHoleNumber's "both" anchor — see parseOSMHoleElements/extract.mjs),
+   with no parent-relation grouping in OpenStreetMap at all, so a neighbouring hole's green-side
+   bunker can get attributed here if it happens to sit closer to THIS hole's green than to its
+   own. The fairway polygon would settle this properly, but OSM fairway coverage is sparse (see
+   the 5 Nov fairway-collection notes) and plenty of holes won't have one — so this doesn't wait
+   on that, it just catches the single most common/obvious failure shape: a bunker sitting well
+   behind this hole's own green along its own tee→green line. Measured from the green's own
+   back-edge reference point (hole.greenLat/greenLon — already the app's canonical "back of the
+   green" point, see parseOSMHoleElements), using each bunker's centroid, via the same local
+   tee-anchored projection the vector diagram uses (projectLocal) — reusing its rotated Y axis as
+   "distance along the hole, tee toward green" without needing the final screen-space flip. Not
+   applied to hazards: the user asked specifically about bunkers, and water/lateral hazards are
+   both rarer and more visually distinct, so the same mis-attribution risk matters less there. */
+function filterBunkersInPlay(bunkers, hole, bearingDegVal, maxMetresPastGreen = 20) {
+  if (!bunkers?.length || hole.teeLat == null || hole.greenLat == null || bearingDegVal == null) return bunkers;
+  const alongAxis = (lat, lon) => -projectLocal(lat, lon, hole.teeLat, hole.teeLon, bearingDegVal).y;
+  const greenAlong = alongAxis(hole.greenLat, hole.greenLon);
+  return bunkers.filter((vertices) => {
+    if (!vertices?.length) return false;
+    const cLat = vertices.reduce((s, p) => s + p.lat, 0) / vertices.length;
+    const cLon = vertices.reduce((s, p) => s + p.lon, 0) / vertices.length;
+    return alongAxis(cLat, cLon) <= greenAlong + maxMetresPastGreen;
+  });
+}
+
 function MapClickCapture({ onPick, rotateDeg }) {
   /* useMapEvents registers its handler object once and does not appear to rebind it on every
      re-render (a stale-closure trap discovered while testing this, 16 Aug — clicks kept using
@@ -1827,6 +1855,13 @@ function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, d
      distanceLabelIcon's own comment. */
   const labelCounterRotate = -cssRotateDeg;
   const mapUnit = distanceUnit === "m" ? "m" : "y";
+  // 6 Nov — same "is this actually in play for this hole" bunker filter HoleViewModal uses,
+  // anchored to the hole's own fixed tee→green line (not whatever this modal's own optional
+  // rotate-to-line toggle/anchor currently is — that's a display preference, this is about which
+  // bunkers are this hole's at all). See filterBunkersInPlay's own comment for why.
+  const bunkerAxisBearing = bearingDeg(hole.teeLat, hole.teeLon, hole.greenLat, hole.greenLon);
+  const inPlayBunkers = filterBunkersInPlay(hole.bunkers, hole, bunkerAxisBearing);
+
   /* bunker/hazard carry distances (3 Nov; hazards added + moved on-map 5 Nov) — "front edge"
      (nearest polygon vertex, where the sand/water actually starts) and "back edge" (farthest
      vertex, i.e. what you'd need to clear to be fully past it) measured from the SAME anchor
@@ -1834,7 +1869,7 @@ function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, d
      clear it from here", not "how far is it from where I just landed", so it's deliberately not
      tied to `pos`. Shown directly on the map as small labels at each polygon's own front/back
      vertex (see distanceLabelIcon below) rather than a separate text list, per explicit request. */
-  const bunkerDistances = bunkerCarryDistances(hole.bunkers, anchorLat, anchorLon);
+  const bunkerDistances = bunkerCarryDistances(inPlayBunkers, anchorLat, anchorLon);
   const hazardDistances = waterHazardCarryDistances(hole.hazards, anchorLat, anchorLon);
 
   return (
@@ -1861,7 +1896,7 @@ function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, d
                  to sand at low opacity, and keeps this map on the app's own palette); hazards
                  use a literal steel-blue since the palette has no water-ish color defined — a
                  one-off map overlay color, not a UI chrome color, so it doesn't need to be in C. */}
-              {(hole.bunkers || []).map((vertices, i) => (
+              {inPlayBunkers.map((vertices, i) => (
                 <Polygon key={`bunker-${i}`} positions={vertices.map((p) => [p.lat, p.lon])} pathOptions={{ color: C.brass, weight: 1, fillColor: C.brass, fillOpacity: 0.45 }} />
               ))}
               {(hole.hazards || []).map((hz, i) => (
@@ -1936,17 +1971,78 @@ function DriveMapModal({ hole, label, shotLabel, fromLat, fromLon, initialPos, d
   );
 }
 
-/* keeps map dragging disabled while a rotation is applied, same reasoning as MapClickCapture's
-   identical effect above — Leaflet's own drag math assumes an unrotated container, so panning
-   would visually go the "wrong" direction once the view is rotated. Read-only (no click
-   handling) since GreenViewModal below never needs to place a pin. */
-function RotationDragLock({ rotateDeg }) {
-  const map = useMap();
-  useEffect(() => {
-    if (rotateDeg) map.dragging.disable(); else map.dragging.enable();
-    return () => map.dragging.enable();
-  }, [rotateDeg, map]);
-  return null;
+/* 6 Nov — read-only rotated map wrapper for GreenViewModal/HoleViewModal, replacing the old
+   same-size wrapper-div rotation + RotationDragLock pair after two real bugs the user hit on a
+   real device/real course:
+   1. "Grey diagonal corners" — the old pattern rotated a div the SAME size as the visible box.
+      Rotating a square/rectangle in place by anything other than a multiple of 90° makes its own
+      footprint swing partly outside the visible box on two sides while leaving the box's own
+      corners uncovered on the other two — exposing the modal's plain background there instead of
+      map tiles. Fixed with a standard "always covers the viewport" trick: render the actual map
+      at DIAGONAL size (a square whose side is the visible box's own diagonal), centered over the
+      box. A square sized to a rectangle's diagonal, centered at the same point, mathematically
+      contains that rectangle at ANY rotation angle (every point of the rectangle is within the
+      rectangle's own circumradius of the center — exactly the square's inradius — so it's always
+      inside). To avoid that bigger canvas also zooming the content OUT (fitBounds would otherwise
+      fit the hole into the whole oversized square), the extra margin is pushed into
+      boundsOptions.paddingTopLeft/paddingBottomRight instead of real framing, so the EFFECTIVE
+      fit area is still just the original visible box — the overflow margin exists purely to give
+      the rotation something real to show at the corners, not to change the zoom level.
+   2. "Can't pan/zoom" — RotationDragLock disabled Leaflet's own dragging outright whenever any
+      rotation was active, which used to only bite occasionally (GreenViewModal) but became the
+      ALWAYS-on state once HoleViewModal switched to a permanently-fixed orientation (5 Nov) — so
+      panning became permanently broken there. Both of these modals are read-only surveys (no
+      click-to-place accuracy to protect, unlike DriveMapModal's own, separate, intentional
+      drag-off-while-rotated behavior — that one stays exactly as it was, out of scope here), so
+      this wrapper just leaves Leaflet's native dragging/pinch-zoom alone and lets it work
+      normally; panning direction will feel "rotated" along with the view, which is an inherent,
+      accepted trade-off of rotating a non-rotation-aware map library via CSS — not a bug. */
+function RotatedSurveyMap({ bounds, singlePoint, singlePointZoom = 17, cssRotateDeg, extraPadding = 24, maxZoom = 22, children }) {
+  const outerRef = useRef(null);
+  const [size, setSize] = useState(null);
+  useLayoutEffect(() => {
+    const el = outerRef.current;
+    if (!el) return;
+    const measure = () => setSize({ w: el.clientWidth, h: el.clientHeight });
+    measure();
+    if (typeof ResizeObserver !== "undefined") {
+      const ro = new ResizeObserver(measure);
+      ro.observe(el);
+      return () => ro.disconnect();
+    }
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
+
+  const rotated = !!cssRotateDeg;
+  const diag = size ? Math.ceil(Math.sqrt(size.w * size.w + size.h * size.h)) : null;
+  // when there's no rotation, a same-size box already covers itself fully -- skip the oversize
+  // entirely so the unrotated (north-up fallback) case still zooms in exactly as tight as before.
+  const boxSize = rotated ? diag : (size ? Math.max(size.w, size.h) : null);
+  const padX = size ? (rotated ? (diag - size.w) / 2 : 0) + extraPadding : extraPadding;
+  const padY = size ? (rotated ? (diag - size.h) / 2 : 0) + extraPadding : extraPadding;
+
+  return (
+    <div ref={outerRef} style={{ height: "100%", width: "100%", position: "relative", overflow: "hidden" }}>
+      {size && (
+        <div style={{
+          position: "absolute", top: "50%", left: "50%", width: boxSize, height: boxSize,
+          marginLeft: -boxSize / 2, marginTop: -boxSize / 2,
+          transform: cssRotateDeg ? `rotate(${cssRotateDeg}deg)` : undefined,
+        }}>
+          <MapContainer
+            {...(bounds ? { bounds, boundsOptions: { paddingTopLeft: [padX, padY], paddingBottomRight: [padX, padY] } } : { center: singlePoint, zoom: singlePointZoom })}
+            maxZoom={maxZoom}
+            zoomSnap={0.1}
+            zoomDelta={0.1}
+            style={{ height: "100%", width: "100%" }}
+          >
+            {children}
+          </MapContainer>
+        </div>
+      )}
+    </div>
+  );
 }
 
 /* 16 Aug — a focused, read-only close-up of just the green, requested after the DriveMapModal's
@@ -1995,39 +2091,22 @@ function GreenViewModal({ hole, fromLat, fromLon, distanceUnit, onClose }) {
           {bearing != null && (
             <div style={{ position: "absolute", top: 6, left: "50%", transform: "translateX(-50%)", zIndex: 500, fontSize: 18, color: C.white, textShadow: "0 1px 3px rgba(0,0,0,0.6)", pointerEvents: "none" }}>⬆</div>
           )}
-          <div style={{ height: "100%", width: "100%", transform: cssRotateDeg ? `rotate(${cssRotateDeg}deg)` : undefined }}>
-            {hasPolygon ? (
-              <MapContainer
-                bounds={bounds}
-                boundsOptions={{ padding: [10, 10] }}
-                maxZoom={22}
-                zoomSnap={0.1}
-                zoomDelta={0.1}
-                style={{ height: "100%", width: "100%" }}
-              >
-                <TileLayer
-                  url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-                  attribution="Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community"
-                  maxNativeZoom={19}
-                  maxZoom={22}
-                />
-                <Polygon positions={hole.greenPolygon.map((p) => [p.lat, p.lon])} pathOptions={{ color: C.white, weight: 2, fillColor: C.turf, fillOpacity: 0.35 }} />
-                {greenLat != null && <Marker position={[greenLat, greenLon]} icon={greenIcon} />}
-                <RotationDragLock rotateDeg={cssRotateDeg} />
-              </MapContainer>
-            ) : (
-              <MapContainer center={[greenLat, greenLon]} zoom={20} maxZoom={22} style={{ height: "100%", width: "100%" }}>
-                <TileLayer
-                  url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-                  attribution="Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community"
-                  maxNativeZoom={19}
-                  maxZoom={22}
-                />
-                <Marker position={[greenLat, greenLon]} icon={greenIcon} />
-                <RotationDragLock rotateDeg={cssRotateDeg} />
-              </MapContainer>
-            )}
-          </div>
+          <RotatedSurveyMap
+            bounds={hasPolygon ? bounds : null}
+            singlePoint={[greenLat, greenLon]}
+            singlePointZoom={20}
+            cssRotateDeg={cssRotateDeg}
+            extraPadding={10}
+          >
+            <TileLayer
+              url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+              attribution="Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community"
+              maxNativeZoom={19}
+              maxZoom={22}
+            />
+            {hasPolygon && <Polygon positions={hole.greenPolygon.map((p) => [p.lat, p.lon])} pathOptions={{ color: C.white, weight: 2, fillColor: C.turf, fillOpacity: 0.35 }} />}
+            {greenLat != null && <Marker position={[greenLat, greenLon]} icon={greenIcon} />}
+          </RotatedSurveyMap>
         </div>
         {distanceToGreen != null && (
           <div style={{ fontFamily: mono, fontSize: 14, color: C.ink, margin: "10px 0" }}>
@@ -2177,25 +2256,14 @@ function HoleViewModal({ hole, fromLat, fromLon, distanceUnit, onClose }) {
   const greenCenterLat = hasGreenPolygon ? L.latLngBounds(hole.greenPolygon.map((p) => [p.lat, p.lon])).getCenter().lat : hole.greenLat;
   const greenCenterLon = hasGreenPolygon ? L.latLngBounds(hole.greenPolygon.map((p) => [p.lat, p.lon])).getCenter().lng : hole.greenLon;
 
-  /* bounds cover everything that's actually mapped for this hole — tee, green (polygon or
-     point), and every bunker/hazard vertex — so a bunker well off to the side of the direct
-     tee-green line is still guaranteed to be in frame, not just assumed to sit along that line. */
-  const boundsPoints = [];
-  if (hole.teeLat != null) boundsPoints.push([hole.teeLat, hole.teeLon]);
-  if (hasGreenPolygon) hole.greenPolygon.forEach((p) => boundsPoints.push([p.lat, p.lon]));
-  else if (hole.greenLat != null) boundsPoints.push([hole.greenLat, hole.greenLon]);
-  (hole.bunkers || []).forEach((vertices) => vertices.forEach((p) => boundsPoints.push([p.lat, p.lon])));
-  (hole.hazards || []).forEach((hz) => hz.vertices.forEach((p) => boundsPoints.push([p.lat, p.lon])));
-  const bounds = boundsPoints.length > 1 ? L.latLngBounds(boundsPoints) : null;
-  const singlePoint = boundsPoints.length === 1 ? boundsPoints[0] : null;
-
   /* 5 Nov — deliberately NOT based on the live GPS anchor any more: this used to rotate as the
      golfer moved around (bearingDeg(anchorLat, anchorLon, ...)), which the user reported as
      unwanted "auto rotate." This view now always orients tee-to-green using the hole's own fixed
      points, so it's a static diagram — tee at the bottom, green at the top — that never moves
      while the modal is open, regardless of where the golfer is standing. Falls back to north-up
      only when one of tee/green is genuinely missing (the View hole button itself only needs one
-     of the two, so that's a real, if rare, case). */
+     of the two, so that's a real, if rare, case). Computed before boundsPoints below (moved
+     ahead 6 Nov) since the bunker in-play filter needs it. */
   const bearing = (hole.teeLat != null && greenCenterLat != null)
     ? bearingDeg(hole.teeLat, hole.teeLon, greenCenterLat, greenCenterLon)
     : null;
@@ -2203,7 +2271,27 @@ function HoleViewModal({ hole, fromLat, fromLon, distanceUnit, onClose }) {
   const labelCounterRotate = -cssRotateDeg;
   const distanceToGreen = anchorLat != null && greenCenterLat != null ? haversineYards(anchorLat, anchorLon, greenCenterLat, greenCenterLon) : null;
 
-  const bunkerDistances = bunkerCarryDistances(hole.bunkers, anchorLat, anchorLon);
+  // 6 Nov — bunkers that sit implausibly far past this hole's own green (likely a neighbouring
+  // hole's bunker, mismatched via the purely-spatial OSM matching — see filterBunkersInPlay)
+  // are dropped before anything downstream sees them: before the bounds-fit below (so a
+  // wrongly-attributed distant bunker doesn't force the whole view to zoom out to fit it), and
+  // before both the satellite and diagram renderers and the carry-distance readout.
+  const filteredBunkers = filterBunkersInPlay(hole.bunkers, hole, bearing);
+  const holeForDisplay = { ...hole, bunkers: filteredBunkers };
+
+  /* bounds cover everything that's actually mapped for this hole — tee, green (polygon or
+     point), and every bunker/hazard vertex — so a bunker well off to the side of the direct
+     tee-green line is still guaranteed to be in frame, not just assumed to sit along that line. */
+  const boundsPoints = [];
+  if (hole.teeLat != null) boundsPoints.push([hole.teeLat, hole.teeLon]);
+  if (hasGreenPolygon) hole.greenPolygon.forEach((p) => boundsPoints.push([p.lat, p.lon]));
+  else if (hole.greenLat != null) boundsPoints.push([hole.greenLat, hole.greenLon]);
+  filteredBunkers.forEach((vertices) => vertices.forEach((p) => boundsPoints.push([p.lat, p.lon])));
+  (hole.hazards || []).forEach((hz) => hz.vertices.forEach((p) => boundsPoints.push([p.lat, p.lon])));
+  const bounds = boundsPoints.length > 1 ? L.latLngBounds(boundsPoints) : null;
+  const singlePoint = boundsPoints.length === 1 ? boundsPoints[0] : null;
+
+  const bunkerDistances = bunkerCarryDistances(filteredBunkers, anchorLat, anchorLon);
   const hazardDistances = waterHazardCarryDistances(hole.hazards, anchorLat, anchorLon);
 
   if (!bounds && !singlePoint) {
@@ -2260,46 +2348,37 @@ function HoleViewModal({ hole, fromLat, fromLon, distanceUnit, onClose }) {
             <div style={{ position: "absolute", top: 6, left: "50%", transform: "translateX(-50%)", zIndex: 500, fontSize: 18, color: C.white, textShadow: "0 1px 3px rgba(0,0,0,0.6)", pointerEvents: "none" }}>⬆</div>
           )}
           {viewMode === "diagram" ? (
-            <HoleDiagramVector hole={hole} bearing={bearing} distanceUnit={distanceUnit} bunkerDistances={bunkerDistances} hazardDistances={hazardDistances} />
+            <HoleDiagramVector hole={holeForDisplay} bearing={bearing} distanceUnit={distanceUnit} bunkerDistances={bunkerDistances} hazardDistances={hazardDistances} />
           ) : (
-            <div style={{ height: "100%", width: "100%", transform: cssRotateDeg ? `rotate(${cssRotateDeg}deg)` : undefined }}>
-              <MapContainer
-                {...(bounds ? { bounds, boundsOptions: { padding: [24, 24] } } : { center: singlePoint, zoom: 17 })}
+            <RotatedSurveyMap bounds={bounds} singlePoint={singlePoint} singlePointZoom={17} cssRotateDeg={cssRotateDeg} extraPadding={24}>
+              <TileLayer
+                url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                attribution="Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community"
+                maxNativeZoom={19}
                 maxZoom={22}
-                zoomSnap={0.1}
-                zoomDelta={0.1}
-                style={{ height: "100%", width: "100%" }}
-              >
-                <TileLayer
-                  url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-                  attribution="Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community"
-                  maxNativeZoom={19}
-                  maxZoom={22}
-                />
-                {(hole.bunkers || []).map((vertices, i) => (
-                  <Polygon key={`bunker-${i}`} positions={vertices.map((p) => [p.lat, p.lon])} pathOptions={{ color: C.brass, weight: 1, fillColor: C.brass, fillOpacity: 0.45 }} />
-                ))}
-                {(hole.hazards || []).map((hz, i) => (
-                  <Polygon key={`hazard-${i}`} positions={hz.vertices.map((p) => [p.lat, p.lon])} pathOptions={{ color: "#2f6f8f", weight: 1, fillColor: "#2f6f8f", fillOpacity: 0.4 }} />
-                ))}
-                {bunkerDistances.map((b, i) => (
-                  <React.Fragment key={`bunker-d-${i}`}>
-                    <Marker position={[b.front.lat, b.front.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(b.frontYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
-                    <Marker position={[b.back.lat, b.back.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(b.backYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
-                  </React.Fragment>
-                ))}
-                {hazardDistances.map((h, i) => (
-                  <React.Fragment key={`hazard-d-${i}`}>
-                    <Marker position={[h.front.lat, h.front.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(h.frontYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
-                    <Marker position={[h.back.lat, h.back.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(h.backYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
-                  </React.Fragment>
-                ))}
-                {hasGreenPolygon && <Polygon positions={hole.greenPolygon.map((p) => [p.lat, p.lon])} pathOptions={{ color: C.white, weight: 2, fillColor: C.turf, fillOpacity: 0.35 }} />}
-                {hole.teeLat != null && <Marker position={[hole.teeLat, hole.teeLon]} icon={teeIcon} />}
-                {hole.greenLat != null && <Marker position={[hole.greenLat, hole.greenLon]} icon={greenIcon} />}
-                <RotationDragLock rotateDeg={cssRotateDeg} />
-              </MapContainer>
-            </div>
+              />
+              {filteredBunkers.map((vertices, i) => (
+                <Polygon key={`bunker-${i}`} positions={vertices.map((p) => [p.lat, p.lon])} pathOptions={{ color: C.brass, weight: 1, fillColor: C.brass, fillOpacity: 0.45 }} />
+              ))}
+              {(hole.hazards || []).map((hz, i) => (
+                <Polygon key={`hazard-${i}`} positions={hz.vertices.map((p) => [p.lat, p.lon])} pathOptions={{ color: "#2f6f8f", weight: 1, fillColor: "#2f6f8f", fillOpacity: 0.4 }} />
+              ))}
+              {bunkerDistances.map((b, i) => (
+                <React.Fragment key={`bunker-d-${i}`}>
+                  <Marker position={[b.front.lat, b.front.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(b.frontYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
+                  <Marker position={[b.back.lat, b.back.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(b.backYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
+                </React.Fragment>
+              ))}
+              {hazardDistances.map((h, i) => (
+                <React.Fragment key={`hazard-d-${i}`}>
+                  <Marker position={[h.front.lat, h.front.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(h.frontYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
+                  <Marker position={[h.back.lat, h.back.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(h.backYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
+                </React.Fragment>
+              ))}
+              {hasGreenPolygon && <Polygon positions={hole.greenPolygon.map((p) => [p.lat, p.lon])} pathOptions={{ color: C.white, weight: 2, fillColor: C.turf, fillOpacity: 0.35 }} />}
+              {hole.teeLat != null && <Marker position={[hole.teeLat, hole.teeLon]} icon={teeIcon} />}
+              {hole.greenLat != null && <Marker position={[hole.greenLat, hole.greenLon]} icon={greenIcon} />}
+            </RotatedSurveyMap>
           )}
         </div>
         {(bunkerDistances.length > 0 || hazardDistances.length > 0) && (
