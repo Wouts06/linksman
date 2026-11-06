@@ -1730,10 +1730,17 @@ const landingIcon = new L.DivIcon({ className: "", html: `<div style="width:16px
 
 /* on-map distance label (5 Nov) — a small pill showing a yardage number, placed directly on a
    bunker/hazard's front or back edge instead of (or alongside) a text list below the map. The
-   inner div carries `counterRotateDeg` so the TEXT stays upright regardless of whether its
-   containing map is currently CSS-rotated for "line of attack" view (HoleViewModal is always
-   rotated when a bearing exists; DriveMapModal's rotation is an optional toggle) — without this,
-   a label could render sideways or upside-down depending on which direction the hole plays.
+   inner div carries an optional `counterRotateDeg` so the TEXT stays upright regardless of
+   whether its containing map is CSS-rotated — needed ONLY by DriveMapModal, which still rotates
+   its map by spinning a plain wrapper div (its "line of attack" toggle); the wrapper rotation
+   spins everything inside it, text included, so DriveMapModal passes its own `labelCounterRotate`
+   to cancel that back out. HoleViewModal's map (RotatedSurveyMap, leaflet-rotate-based since the
+   6 Nov migration) does NOT need this: leaflet-rotate's own L.Marker patch defaults every
+   marker's `rotation`/`rotateWithView` to 0/false, so marker icons there are never rotated with
+   the map bearing in the first place — passing a counter-rotation angle anyway (as this used to,
+   left over from before the migration) just tilts otherwise-upright text by that same angle,
+   which is exactly the "labels aren't horizontal" bug a user caught on 6 Nov. HoleViewModal now
+   calls this with the default `counterRotateDeg = 0`, i.e. omits the argument entirely.
    `iconAnchor: [0,0]` + the inner `translate(-50%,-50%)` centers the pill exactly on the given
    lat/lon regardless of the pill's own (variable, text-length-dependent) rendered size. */
 function distanceLabelIcon(text, counterRotateDeg = 0) {
@@ -2349,8 +2356,19 @@ function HoleViewModal({ hole, fromLat, fromLon, distanceUnit, onClose }) {
   const bearing = (hole.teeLat != null && greenCenterLat != null)
     ? bearingDeg(hole.teeLat, hole.teeLon, greenCenterLat, greenCenterLon)
     : null;
-  const cssRotateDeg = bearing != null ? -bearing : 0;
-  const labelCounterRotate = -cssRotateDeg;
+  /* 6 Nov (leaflet-rotate round) — this view's map is RotatedSurveyMap, which rotates via
+     leaflet-rotate's own map.setBearing(), not a CSS-rotated wrapper div. leaflet-rotate's
+     L.Marker patch defaults every marker's `rotation`/`rotateWithView` to false/0, so marker
+     icons (including these distanceLabelIcon pills, which are plain Markers) already stay
+     screen-upright on their own — unlike the old wrapper-div technique, nothing here rotates
+     them, so nothing needs to counter-rotate them back. Passing a non-zero angle into
+     distanceLabelIcon would do the opposite of what's wanted: it'd tilt otherwise-upright text
+     BY that angle (this is what the user saw — a leftover `labelCounterRotate = bearing` value
+     from the pre-leaflet-rotate implementation, still being passed in here after the 6 Nov
+     migration even though the thing it used to counteract — the wrapper div's own rotation — no
+     longer exists). DriveMapModal is unaffected: it still uses the old CSS-rotated-wrapper
+     technique (see its own cssRotateDeg above), where counter-rotating labels is still correct
+     and still needed. */
   const distanceToGreen = anchorLat != null && greenCenterLat != null ? haversineYards(anchorLat, anchorLon, greenCenterLat, greenCenterLon) : null;
 
   // 6 Nov — bunkers that sit implausibly far past this hole's own green (likely a neighbouring
@@ -2447,14 +2465,14 @@ function HoleViewModal({ hole, fromLat, fromLon, distanceUnit, onClose }) {
               ))}
               {bunkerDistances.map((b, i) => (
                 <React.Fragment key={`bunker-d-${i}`}>
-                  <Marker position={[b.front.lat, b.front.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(b.frontYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
-                  <Marker position={[b.back.lat, b.back.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(b.backYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
+                  <Marker position={[b.front.lat, b.front.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(b.frontYards, distanceUnit))}${mapUnit}`)} />
+                  <Marker position={[b.back.lat, b.back.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(b.backYards, distanceUnit))}${mapUnit}`)} />
                 </React.Fragment>
               ))}
               {hazardDistances.map((h, i) => (
                 <React.Fragment key={`hazard-d-${i}`}>
-                  <Marker position={[h.front.lat, h.front.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(h.frontYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
-                  <Marker position={[h.back.lat, h.back.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(h.backYards, distanceUnit))}${mapUnit}`, labelCounterRotate)} />
+                  <Marker position={[h.front.lat, h.front.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(h.frontYards, distanceUnit))}${mapUnit}`)} />
+                  <Marker position={[h.back.lat, h.back.lon]} icon={distanceLabelIcon(`${Math.round(displayDistance(h.backYards, distanceUnit))}${mapUnit}`)} />
                 </React.Fragment>
               ))}
               {hasGreenPolygon && <Polygon positions={hole.greenPolygon.map((p) => [p.lat, p.lon])} pathOptions={{ color: C.white, weight: 2, fillColor: C.turf, fillOpacity: 0.35 }} />}
